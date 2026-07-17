@@ -1,5 +1,6 @@
 package com.youkeda.project.wechatproject.ilink;
 
+import com.github.wechat.ilink.sdk.ILinkClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
@@ -15,11 +16,13 @@ public class IlinkClientLifecycle implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(IlinkClientLifecycle.class);
 
-    private final IlinkWechatService service;
+    private final ILinkClient ilinkClient;
+    private final MessageBridge messageBridge;
     private final IlinkProperties props;
 
-    public IlinkClientLifecycle(IlinkWechatService service, IlinkProperties props) {
-        this.service = service;
+    public IlinkClientLifecycle(ILinkClient ilinkClient, MessageBridge messageBridge, IlinkProperties props) {
+        this.ilinkClient = ilinkClient;
+        this.messageBridge = messageBridge;
         this.props = props;
     }
 
@@ -29,13 +32,13 @@ public class IlinkClientLifecycle implements DisposableBean {
             log.info("iLink auto-login disabled (ilink.auto-login=false)");
             return;
         }
-        if (service.isLoggedIn()) {
+        if (ilinkClient.isLoggedIn()) {
             log.info("iLink already logged in (resumed from saved context)");
             return;
         }
         log.info("starting iLink login...");
         try {
-            String qrcode = service.login();
+            String qrcode = messageBridge.login(ilinkClient);
             String qrPreview = qrcode != null && qrcode.length() > 80
                     ? qrcode.substring(0, 80) + "..." : qrcode;
             log.info("iLink QR code obtained ({} chars), preview: {}", qrcode != null ? qrcode.length() : 0, qrPreview);
@@ -50,6 +53,6 @@ public class IlinkClientLifecycle implements DisposableBean {
 
     @Override
     public void destroy() {
-        service.close();
+        ilinkClient.close();
     }
 }

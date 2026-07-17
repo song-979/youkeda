@@ -1,5 +1,6 @@
 package com.youkeda.project.wechatproject.ilink;
 
+import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.EncodeHintType;
 import com.google.zxing.WriterException;
@@ -32,20 +33,22 @@ public class QrCodeController {
     private static final int QR_CODE_SIZE = 320;
     private static final Map<EncodeHintType, Object> QR_CODE_HINTS = createQrCodeHints();
 
-    private final IlinkWechatService service;
+    private final ILinkClient ilinkClient;
+    private final MessageBridge messageBridge;
 
-    public QrCodeController(IlinkWechatService service) {
-        this.service = service;
+    public QrCodeController(ILinkClient ilinkClient, MessageBridge messageBridge) {
+        this.ilinkClient = ilinkClient;
+        this.messageBridge = messageBridge;
     }
 
     @GetMapping(value = "/ilink/qrcode", produces = "text/html;charset=UTF-8")
     public String qrCode() {
-        if (service.isLoggedIn()) {
-            return page("<h2>已登录成功</h2><p>botId: " + escape(service.getLoginContext().getBotId()) + "</p>",
+        if (ilinkClient.isLoggedIn()) {
+            return page("<h2>已登录成功</h2><p>botId: " + escape(ilinkClient.getLoginContext().getBotId()) + "</p>",
                     "padding-top:80px;");
         }
 
-        String qrCodeContent = service.getQrCodeContent();
+        String qrCodeContent = messageBridge.getQrcode();
         if (qrCodeContent == null || qrCodeContent.isEmpty()) {
             return refreshPage(3, "<h2>正在获取二维码...</h2><p>页面每3秒自动刷新</p>", "padding-top:80px;");
         }

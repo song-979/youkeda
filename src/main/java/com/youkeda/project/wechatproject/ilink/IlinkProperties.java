@@ -2,39 +2,18 @@ package com.youkeda.project.wechatproject.ilink;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-/**
- * iLink 接入层配置。
- * 在 application.properties / yml 中以 {@code ilink.*} 前缀覆盖。
- */
 @ConfigurationProperties(prefix = "ilink")
 public class IlinkProperties {
 
-    /** 是否启用接入层 */
-    private boolean enabled = true;
-
-    /** 应用启动后是否自动发起登录 */
-    private boolean autoLogin = true;
-
-    /** 登录超时（毫秒） */
-    private long loginTimeoutMs = 180_000;
-
-    /** 心跳间隔（毫秒） */
-    private long heartbeatIntervalMs = 5000;
-
-    /** 是否启用心跳 */
-    private boolean heartbeatEnabled = true;
-
-    /** 连接超时（毫秒） */
-    private long connectTimeoutMs = 35_000;
-
-    /** 读取超时（毫秒） */
-    private long readTimeoutMs = 35_000;
-
-    /** 写入超时（毫秒） */
-    private long writeTimeoutMs = 35_000;
-
-    /** HTTP 最大重试次数 */
-    private int httpMaxRetries = 3;
+    private boolean enabled;
+    private boolean autoLogin;
+    private long loginTimeoutMs;
+    private long heartbeatIntervalMs;
+    private boolean heartbeatEnabled;
+    private long connectTimeoutMs;
+    private long readTimeoutMs;
+    private long writeTimeoutMs;
+    private int httpMaxRetries;
 
     // ---- getters / setters ----
 
