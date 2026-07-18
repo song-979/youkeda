@@ -7,7 +7,7 @@ import java.util.List;
 /**
  * OpenAI Chat Completions 响应体。
  */
-class ChatResponse {
+public class ChatResponse {
 
     @JsonProperty("id")
     private String id;
@@ -35,7 +35,7 @@ class ChatResponse {
 
     // ---- inner classes ----
 
-    static class Choice {
+    public static class Choice {
         @JsonProperty("index")
         private int index;
 
@@ -55,7 +55,7 @@ class ChatResponse {
         public void setFinishReason(String finishReason) { this.finishReason = finishReason; }
     }
 
-    static class Message {
+    public static class Message {
         @JsonProperty("role")
         private String role;
 

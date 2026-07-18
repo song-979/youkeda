@@ -11,7 +11,7 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
 import java.io.IOException;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -41,8 +41,8 @@ public class OpenAiCompatibleClient implements AiModelClient {
     }
 
     @Override
-    public String chat(String userMessage, List<String> imageBase64Urls) throws IOException {
-        ChatRequest request = buildRequest(userMessage, imageBase64Urls);
+    public String chat(String userMessage, List<String> imageBase64Urls, List<ChatRequest.Message> history) throws IOException {
+        ChatRequest request = buildRequest(userMessage, imageBase64Urls, history);
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(props.getApiKey());
@@ -80,21 +80,24 @@ public class OpenAiCompatibleClient implements AiModelClient {
         }
     }
 
-    private ChatRequest buildRequest(String userMessage, List<String> imageBase64Urls) {
+    private ChatRequest buildRequest(String userMessage, List<String> imageBase64Urls,
+                                     List<ChatRequest.Message> history) {
         ChatRequest.Message userMsg;
         if (imageBase64Urls != null && !imageBase64Urls.isEmpty()) {
-            // 多模态请求
             log.debug("building multimodal request with {} image(s)", imageBase64Urls.size());
             userMsg = new ChatRequest.Message("user", userMessage, imageBase64Urls);
         } else {
-            // 纯文本请求
             userMsg = new ChatRequest.Message("user", userMessage);
         }
 
-        List<ChatRequest.Message> messages = Arrays.asList(
-                new ChatRequest.Message("system", props.getSystemPrompt()),
-                userMsg
-        );
+        // system → history... → current user
+        List<ChatRequest.Message> messages = new ArrayList<>();
+        messages.add(new ChatRequest.Message("system", props.getSystemPrompt()));
+        if (history != null && !history.isEmpty()) {
+            messages.addAll(history);
+        }
+        messages.add(userMsg);
+
         return new ChatRequest(props.getModel(), messages, props.getTemperature(), props.getMaxTokens());
     }
 }

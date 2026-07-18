@@ -12,12 +12,13 @@ import java.util.List;
 public interface AiModelClient {
 
     /**
-     * 发送用户消息，可选附带图片。
+     * 发送用户消息，附带历史上下文和可选图片。
      *
      * @param userMessage     用户输入的文本
      * @param imageBase64Urls 图片 data URI 列表（如 "data:image/png;base64,..."），传空集合/null 表示无图片
+     * @param history         历史对话消息（按时间顺序），传空集合/null 表示无历史
      * @return AI 回复文本，不应返回 null
-     * @throws IOException 网络或 API 调用失败时抛出（含模型不支持图片时 API 返回的错误）
+     * @throws IOException 网络或 API 调用失败时抛出
      */
-    String chat(String userMessage, List<String> imageBase64Urls) throws IOException;
+    String chat(String userMessage, List<String> imageBase64Urls, List<ChatRequest.Message> history) throws IOException;
 }

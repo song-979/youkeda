@@ -16,7 +16,7 @@ import java.util.List;
  *   <li>多模态：{@code "content": [{"type":"text","text":"..."},{"type":"image_url",...}]}</li>
  * </ul>
  */
-class ChatRequest {
+public class ChatRequest {
 
     @JsonProperty("model")
     private String model;
@@ -56,7 +56,7 @@ class ChatRequest {
 
     // ==================== Message ====================
 
-    static class Message {
+    public static class Message {
         @JsonProperty("role")
         private String role;
 
@@ -66,17 +66,17 @@ class ChatRequest {
         @JsonProperty("content")
         private Object content;
 
-        Message() {
+        public Message() {
         }
 
         /** 纯文本消息 */
-        Message(String role, String textContent) {
+        public Message(String role, String textContent) {
             this.role = role;
             this.content = textContent;
         }
 
         /** 多模态消息（文本 + 图片） */
-        Message(String role, String text, List<String> imageBase64Urls) {
+        public Message(String role, String text, List<String> imageBase64Urls) {
             this.role = role;
             List<ContentPart> parts = new ArrayList<>();
             if (text != null && !text.isEmpty()) {
