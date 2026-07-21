@@ -1,4 +1,4 @@
-package com.youkeda.project.wechatproject.ilink;
+package com.youkeda.project.wechatproject.controller;
 
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.zxing.BarcodeFormat;
@@ -6,8 +6,10 @@ import com.google.zxing.EncodeHintType;
 import com.google.zxing.WriterException;
 import com.google.zxing.common.BitMatrix;
 import com.google.zxing.qrcode.QRCodeWriter;
+import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -23,9 +25,10 @@ import java.util.EnumMap;
 import java.util.Map;
 
 /**
- * 提供扫码登录页面。
+ * Provides the iLink QR-code login page.
  */
 @RestController
+@ConditionalOnProperty(prefix = "ilink", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class QrCodeController {
 
     private static final Logger log = LoggerFactory.getLogger(QrCodeController.class);
