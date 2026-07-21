@@ -30,14 +30,22 @@ public class ChatRequest {
     @JsonProperty("max_tokens")
     private int maxTokens;
 
+    @JsonProperty("stream")
+    private boolean stream;
+
     ChatRequest() {
     }
 
     ChatRequest(String model, List<Message> messages, double temperature, int maxTokens) {
+        this(model, messages, temperature, maxTokens, false);
+    }
+
+    ChatRequest(String model, List<Message> messages, double temperature, int maxTokens, boolean stream) {
         this.model = model;
         this.messages = messages;
         this.temperature = temperature;
         this.maxTokens = maxTokens;
+        this.stream = stream;
     }
 
     // ---- getters / setters ----
@@ -53,6 +61,9 @@ public class ChatRequest {
 
     public int getMaxTokens() { return maxTokens; }
     public void setMaxTokens(int maxTokens) { this.maxTokens = maxTokens; }
+
+    public boolean isStream() { return stream; }
+    public void setStream(boolean stream) { this.stream = stream; }
 
     // ==================== Message ====================
 

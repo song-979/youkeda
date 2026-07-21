@@ -23,7 +23,7 @@ public class AgentProperties {
     private String imageGenSize = "1024x1024";
     private int imageGenN = 1;
 
-    // ---- 意图识别配置（预留，当前 RegexIntentRecognizer 无需模型） ----
+    // ---- 编排模型配置（复用 intent 命名，历史兼容） ----
     private String intentModel;
     private String intentApiUrl;
     private String intentApiKey;

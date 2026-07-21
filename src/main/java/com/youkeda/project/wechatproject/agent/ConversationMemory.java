@@ -32,4 +32,24 @@ public interface ConversationMemory {
      * 清除指定用户的所有历史。
      */
     void clear(String userId);
+
+    /**
+     * 记住最近一次图片上下文，供后续多轮追问继续使用。
+     */
+    default void rememberImageContext(String userId, List<String> imageBase64Urls, String summary) {
+    }
+
+    /**
+     * 获取最近一次图片上下文的 data URI。
+     */
+    default List<String> getLatestImageDataUrls(String userId) {
+        return List.of();
+    }
+
+    /**
+     * 获取最近一次图片上下文的文字摘要。
+     */
+    default String getLatestImageSummary(String userId) {
+        return null;
+    }
 }

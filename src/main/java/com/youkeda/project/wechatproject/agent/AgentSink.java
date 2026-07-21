@@ -2,18 +2,25 @@ package com.youkeda.project.wechatproject.agent;
 
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.listener.OnMessageListener;
+import com.github.wechat.ilink.sdk.core.model.FileItem;
 import com.github.wechat.ilink.sdk.core.model.MessageItem;
 import com.github.wechat.ilink.sdk.core.model.TextItem;
+import com.github.wechat.ilink.sdk.core.model.VoiceItem;
 import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
-import com.youkeda.project.wechatproject.agent.intent.IntentRecognizer;
-import com.youkeda.project.wechatproject.agent.intent.IntentResult;
-import com.youkeda.project.wechatproject.agent.routing.MessageRouter;
-import com.youkeda.project.wechatproject.agent.routing.ModelReply;
+import com.youkeda.project.wechatproject.agent.file.FileParseResult;
+import com.youkeda.project.wechatproject.agent.file.FileParserRegistry;
+import com.youkeda.project.wechatproject.agent.speech.AudioConverter;
+import com.youkeda.project.wechatproject.agent.speech.SpeechToTextClient;
 import com.youkeda.project.wechatproject.ilink.MessageBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
 
+import javax.imageio.IIOImage;
+import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.MemoryCacheImageOutputStream;
 import java.awt.Graphics2D;
 import java.awt.Image;
 import java.awt.image.BufferedImage;
@@ -27,25 +34,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
-import javax.imageio.IIOImage;
-import javax.imageio.ImageIO;
-import javax.imageio.ImageWriteParam;
-import javax.imageio.ImageWriter;
-import javax.imageio.stream.MemoryCacheImageOutputStream;
-
-/**
- * Agent 消息处理器。
- * <p>
- * 职责：
- * <ol>
- *   <li>从微信消息中提取文本、下载并压缩图片</li>
- *   <li>调用 {@link IntentRecognizer} 做意图识别</li>
- *   <li>调用 {@link MessageRouter} 路由到对应模型并获取回复</li>
- *   <li>将 {@link ModelReply} 分发到 iLink 通道发送给用户</li>
- * </ol>
- * <p>
- * 记忆和模型调用逻辑已移至 {@link MessageRouter}，本类不再直接操作。
- */
 public class AgentSink implements OnMessageListener, InitializingBean {
 
     private static final Logger log = LoggerFactory.getLogger(AgentSink.class);
@@ -54,32 +42,37 @@ public class AgentSink implements OnMessageListener, InitializingBean {
     private static final int MESSAGE_TYPE_IMAGE = 2;
     private static final int MESSAGE_TYPE_VOICE = 3;
     private static final int MESSAGE_TYPE_FILE = 4;
-    private static final int MESSAGE_TYPE_VIDEO = 5;
+
+    private static final int MAX_IMAGE_DIMENSION = 1024;
+    private static final float JPEG_QUALITY = 0.8f;
+    private static final long MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
     private final ILinkClient ilinkClient;
     private final MessageBridge messageBridge;
-    private final IntentRecognizer intentRecognizer;
     private final MessageRouter router;
+    private final SpeechToTextClient sttClient;
+    private final AudioConverter audioConverter;
+    private final FileParserRegistry fileParserRegistry;
 
     public AgentSink(ILinkClient ilinkClient,
                      MessageBridge messageBridge,
-                     IntentRecognizer intentRecognizer,
-                     MessageRouter router) {
+                     MessageRouter router,
+                     SpeechToTextClient sttClient,
+                     AudioConverter audioConverter,
+                     FileParserRegistry fileParserRegistry) {
         this.ilinkClient = ilinkClient;
         this.messageBridge = messageBridge;
-        this.intentRecognizer = intentRecognizer;
         this.router = router;
+        this.sttClient = sttClient;
+        this.audioConverter = audioConverter;
+        this.fileParserRegistry = fileParserRegistry;
     }
-
-    // ==================== 自动注册 ====================
 
     @Override
     public void afterPropertiesSet() {
         messageBridge.addListener(this);
         log.info("agent sink registered to message bridge");
     }
-
-    // ==================== 消息处理 ====================
 
     @Override
     public void onMessages(List<WeixinMessage> messages) {
@@ -90,7 +83,7 @@ public class AgentSink implements OnMessageListener, InitializingBean {
 
     private void handleMessage(WeixinMessage msg) {
         String fromUserId = msg.getFrom_user_id();
-        if (fromUserId == null) {
+        if (fromUserId == null || fromUserId.isBlank()) {
             log.debug("ignoring message without from_user_id");
             return;
         }
@@ -100,28 +93,36 @@ public class AgentSink implements OnMessageListener, InitializingBean {
             return;
         }
 
-        // 1. 提取文本 + 下载图片
         String text = extractText(items);
         List<String> imageBase64Urls = downloadImages(items);
 
-        boolean hasText = !text.isEmpty();
-        boolean hasImages = !imageBase64Urls.isEmpty();
+        // 处理文件消息（type=4）
+        FileParseResult fileResult = parseFiles(items);
+        if (fileResult != null) {
+            text = annotateFileContent(fileResult, text);
+            // 嵌入图片走压缩管道转换为 base64
+            List<String> fileImageUrls = compressFileImages(fileResult.images());
+            List<String> combinedImages = new ArrayList<>(fileImageUrls);
+            combinedImages.addAll(imageBase64Urls);
+            imageBase64Urls = combinedImages;
+        }
 
-        if (!hasText) {
-            if (hasImages) {
-                text = "请描述一下这张图片";
+        if (text.isBlank()) {
+            if (!imageBase64Urls.isEmpty()) {
+                text = "【用户发送了图片】\n请描述你在这张图片中看到的内容。";
             } else {
-                replyNotSupported(fromUserId);
-                return;
+                String voiceText = extractVoiceText(items);
+                if (voiceText != null && !voiceText.isBlank()) {
+                    text = "【用户语音消息】\n语音识别结果：\n" + voiceText;
+                } else {
+                    replyNotSupported(fromUserId);
+                    return;
+                }
             }
         }
 
-        // 2. 意图识别（只看文本）
-        IntentResult intent = intentRecognizer.recognize(text);
-
-        // 3. 路由执行（router 内部处理 memory + 模型调用）
         try {
-            ModelReply reply = router.route(fromUserId, text, imageBase64Urls, intent);
+            ModelReply reply = router.route(fromUserId, text, imageBase64Urls);
             dispatch(fromUserId, reply);
             log.info("reply dispatched to user={}, type={}", fromUserId, reply.getType());
         } catch (IOException e) {
@@ -133,43 +134,114 @@ public class AgentSink implements OnMessageListener, InitializingBean {
         }
     }
 
-    // ==================== 分发回复 ====================
-
-    /**
-     * 根据 {@link ModelReply} 的类型，通过 iLink 通道发送给用户。
-     */
     private void dispatch(String toUser, ModelReply reply) throws IOException {
         switch (reply.getType()) {
             case TEXT -> {
+                trySendProgress(toUser, "正在思考...");
                 ilinkClient.sendText(toUser, reply.getTextContent());
             }
             case IMAGE -> {
-                // 先生成中提示（异步发送，失败了也无所谓）
-                trySendProgress(toUser);
+                trySendProgress(toUser, "正在生成图片，请稍候...");
                 for (ModelReply.ImagePayload img : reply.getImages()) {
-                    ilinkClient.sendImage(toUser, img.bytes(), img.fileName(), null);
+                    sendImageWithFallback(toUser, img);
                 }
             }
             case MIXED -> {
-                if (reply.getTextContent() != null && !reply.getTextContent().isEmpty()) {
+                trySendProgress(toUser, mixedProgressMessage(reply));
+                if (reply.getTextContent() != null && !reply.getTextContent().isBlank()) {
                     ilinkClient.sendText(toUser, reply.getTextContent());
                 }
                 for (ModelReply.ImagePayload img : reply.getImages()) {
-                    ilinkClient.sendImage(toUser, img.bytes(), img.fileName(), null);
+                    sendImageWithFallback(toUser, img);
                 }
+                if (reply.getFilePayload() != null) {
+                    ModelReply.FilePayload file = reply.getFilePayload();
+                    ilinkClient.sendFile(toUser, file.bytes(), file.fileName(), null);
+                }
+                if (reply.getAudioPayload() != null) {
+                    ModelReply.AudioPayload audio = reply.getAudioPayload();
+                    byte[] mp3Bytes = audioConverter.wavToMp3(audio.bytes());
+                    ilinkClient.sendFile(toUser, mp3Bytes, "tts.mp3", null);
+                }
+            }
+            case VOICE -> {
+                trySendProgress(toUser, "正在生成语音，请稍候...");
+                ModelReply.AudioPayload audio = reply.getAudioPayload();
+                byte[] mp3Bytes = audioConverter.wavToMp3(audio.bytes());
+                ilinkClient.sendFile(toUser, mp3Bytes, "tts.mp3", null);
+            }
+            case FILE -> {
+                trySendProgress(toUser, "正在生成文件，请稍候...");
+                ModelReply.FilePayload file = reply.getFilePayload();
+                ilinkClient.sendFile(toUser, file.bytes(), file.fileName(), null);
             }
         }
     }
 
-    private void trySendProgress(String toUser) {
+    private static String mixedProgressMessage(ModelReply reply) {
+        boolean hasImage = !reply.getImages().isEmpty();
+        boolean hasAudio = reply.getAudioPayload() != null;
+        boolean hasFile = reply.getFilePayload() != null;
+
+        if (hasImage && hasAudio && hasFile) {
+            return "正在生成图片、语音和文件，请稍候...";
+        }
+        if (hasImage && hasAudio) {
+            return "正在生成图片和语音，请稍候...";
+        }
+        if (hasImage && hasFile) {
+            return "正在生成图片和文件，请稍候...";
+        }
+        if (hasAudio && hasFile) {
+            return "正在生成语音和文件，请稍候...";
+        }
+        if (hasImage) {
+            return "正在生成图片，请稍候...";
+        }
+        if (hasAudio) {
+            return "正在生成语音，请稍候...";
+        }
+        if (hasFile) {
+            return "正在生成文件，请稍候...";
+        }
+        return "正在处理...";
+    }
+
+    private void sendImageWithFallback(String toUser, ModelReply.ImagePayload image) {
         try {
-            ilinkClient.sendText(toUser, "正在生成图片，请稍候...");
+            ilinkClient.sendImage(toUser, image.bytes(), image.fileName(), null);
+            return;
+        } catch (Exception imageError) {
+            log.error("failed to send image to user={}, fileName={}, bytes={}",
+                    toUser, image.fileName(), image.bytes().length, imageError);
+        }
+
+        try {
+            ilinkClient.sendText(toUser, "图片已经生成了，但微信图片通道上传失败，先给你发送文件版本。");
+        } catch (IOException noticeError) {
+            log.debug("failed to send image fallback notice to user={}", toUser, noticeError);
+        }
+
+        try {
+            ilinkClient.sendFile(toUser, image.bytes(), image.fileName(), null);
+        } catch (Exception fileError) {
+            log.error("failed to send image file fallback to user={}, fileName={}",
+                    toUser, image.fileName(), fileError);
+            try {
+                ilinkClient.sendText(toUser, "图片已经生成，但上传到微信失败了，请稍后再试一次。");
+            } catch (IOException finalNoticeError) {
+                log.debug("failed to send final image failure notice to user={}", toUser, finalNoticeError);
+            }
+        }
+    }
+
+    private void trySendProgress(String toUser, String message) {
+        try {
+            ilinkClient.sendText(toUser, message);
         } catch (IOException e) {
             log.debug("failed to send progress hint to user={}", toUser);
         }
     }
-
-    // ==================== 文 本 提 取 ====================
 
     private static String extractText(List<MessageItem> items) {
         return items.stream()
@@ -181,25 +253,24 @@ public class AgentSink implements OnMessageListener, InitializingBean {
                 .collect(Collectors.joining());
     }
 
-    // ==================== 图 片 下 载 & 压 缩 ====================
-
-    private static final int MAX_IMAGE_DIMENSION = 1024;
-    private static final float JPEG_QUALITY = 0.8f;
-
     private List<String> downloadImages(List<MessageItem> items) {
         List<String> uris = new ArrayList<>();
         for (MessageItem item : items) {
-            if (item.getType() != MESSAGE_TYPE_IMAGE) continue;
+            if (item.getType() != MESSAGE_TYPE_IMAGE) {
+                continue;
+            }
             try {
                 byte[] raw = ilinkClient.downloadImageFromMessageItem(item);
-                if (raw == null || raw.length == 0) continue;
+                if (raw == null || raw.length == 0) {
+                    continue;
+                }
 
                 byte[] compressed = compressImage(raw);
                 String dataUri = "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(compressed);
                 uris.add(dataUri);
                 log.info("image processed: raw={}KB -> compressed={}KB", raw.length / 1024, compressed.length / 1024);
             } catch (Exception e) {
-                log.error("failed to download/compress image", e);
+                log.error("failed to download or compress image", e);
             }
         }
         return uris;
@@ -208,12 +279,11 @@ public class AgentSink implements OnMessageListener, InitializingBean {
     private static byte[] compressImage(byte[] raw) throws IOException {
         BufferedImage src = ImageIO.read(new ByteArrayInputStream(raw));
         if (src == null) {
-            log.warn("cannot decode image, sending raw bytes");
+            log.warn("cannot decode image, returning raw bytes");
             return raw;
         }
 
         BufferedImage scaled = resizeIfNeeded(src);
-
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpeg");
         if (writers.hasNext()) {
@@ -227,7 +297,6 @@ public class AgentSink implements OnMessageListener, InitializingBean {
         } else {
             ImageIO.write(scaled, "jpg", out);
         }
-
         return out.toByteArray();
     }
 
@@ -240,8 +309,8 @@ public class AgentSink implements OnMessageListener, InitializingBean {
         }
 
         double ratio = (double) MAX_IMAGE_DIMENSION / max;
-        int newW = (int) (w * ratio);
-        int newH = (int) (h * ratio);
+        int newW = Math.max(1, (int) (w * ratio));
+        int newH = Math.max(1, (int) (h * ratio));
 
         Image scaled = src.getScaledInstance(newW, newH, Image.SCALE_SMOOTH);
         BufferedImage result = new BufferedImage(newW, newH, BufferedImage.TYPE_INT_RGB);
@@ -251,24 +320,235 @@ public class AgentSink implements OnMessageListener, InitializingBean {
         return result;
     }
 
-    // ==================== 错 误 回 复 ====================
+    private String extractVoiceText(List<MessageItem> items) {
+        if (sttClient == null) {
+            return null;
+        }
+        for (MessageItem item : items) {
+            if (item.getType() != MESSAGE_TYPE_VOICE) {
+                continue;
+            }
+
+            VoiceItem voiceItem = item.getVoice_item();
+            if (voiceItem == null) {
+                continue;
+            }
+
+            try {
+                if (voiceItem.getText() != null && !voiceItem.getText().isBlank()) {
+                    String inlineText = voiceItem.getText().trim();
+                    log.info("using voice transcript from message metadata: encodeType={}, text={}",
+                            voiceItem.getEncode_type(), inlineText);
+                    return inlineText;
+                }
+
+                byte[] voiceBytes = ilinkClient.downloadVoiceFromMessageItem(item);
+                if (voiceBytes == null || voiceBytes.length == 0) {
+                    continue;
+                }
+
+                String format = voiceFormatOf(voiceItem.getEncode_type());
+                log.info("downloaded voice bytes: {}B, encodeType={}, sampleRate={}, playtime={}ms",
+                        voiceBytes.length, voiceItem.getEncode_type(),
+                        voiceItem.getSample_rate(), voiceItem.getPlaytime());
+                String text = sttClient.recognize(voiceBytes, format);
+                log.info("STT result: {}", text);
+                return text;
+            } catch (Exception e) {
+                log.error("STT failed", e);
+            }
+        }
+        return null;
+    }
+
+    private static String voiceFormatOf(Integer encodeType) {
+        if (encodeType == null) {
+            return "silk";
+        }
+        return switch (encodeType) {
+            case 1 -> "wav";
+            case 5 -> "amr";
+            case 6 -> "silk";
+            case 7 -> "mp3";
+            case 8 -> "ogg";
+            default -> "silk";
+        };
+    }
 
     private void replyNotSupported(String toUserId) {
         try {
-            ilinkClient.sendText(toUserId, "目前只支持文字和图片消息，请发送文字或图片给我吧~");
+            ilinkClient.sendText(toUserId, "目前支持文本、图片和语音消息，请发文字、图片或语音给我。");
         } catch (IOException e) {
             log.error("failed to send not-supported hint to user={}", toUserId, e);
         }
     }
 
     private void sendErrorReply(String toUserId, String detail) {
-        String reply = detail != null
-                ? "抱歉，AI 服务返回错误: " + detail + "\n请稍后再试。"
+        String reply = detail != null && !detail.isBlank()
+                ? "抱歉，AI 服务返回错误：" + detail + "\n请稍后再试。"
                 : "抱歉，处理消息时发生错误，请稍后再试。";
         try {
             ilinkClient.sendText(toUserId, reply);
         } catch (IOException e) {
             log.error("failed to send error fallback to user={}", toUserId, e);
         }
+    }
+
+    // ---- 文件解析 ----
+
+    /**
+     * 解析消息中的文件（type=4）。只处理第一个支持的文件。
+     */
+    private FileParseResult parseFiles(List<MessageItem> items) {
+        if (fileParserRegistry == null || fileParserRegistry.isEmpty()) {
+            return null;
+        }
+        for (MessageItem item : items) {
+            if (item.getType() != MESSAGE_TYPE_FILE) {
+                continue;
+            }
+            FileItem fileItem = item.getFile_item();
+            if (fileItem == null) {
+                continue;
+            }
+            String fileName = fileItem.getFile_name();
+            if (fileName == null || fileName.isBlank()) {
+                log.warn("file message without filename, skipping");
+                continue;
+            }
+
+            String extension = FileParserRegistry.extractExtension(fileName);
+            if (extension == null || !fileParserRegistry.isSupported(extension)) {
+                log.debug("unsupported file extension: .{} for '{}'", extension, fileName);
+                continue;
+            }
+
+            try {
+                // 检查文件大小
+                long fileLen = parseFileLen(fileItem.getLen());
+                if (fileLen > MAX_FILE_SIZE) {
+                    log.warn("file too large: '{}' {}B > {}B", fileName, fileLen, MAX_FILE_SIZE);
+                    return new FileParseResult(
+                            "⚠️ 文件解析失败：文件过大（" + (fileLen / 1024 / 1024) + "MB），最大支持 10MB",
+                            List.of(), fileName);
+                }
+
+                byte[] bytes = ilinkClient.downloadFileFromMessageItem(item);
+                if (bytes == null || bytes.length == 0) {
+                    log.warn("downloaded file bytes empty: '{}'", fileName);
+                    continue;
+                }
+
+                if (bytes.length > MAX_FILE_SIZE) {
+                    log.warn("downloaded file too large: '{}' {}B", fileName, bytes.length);
+                    return new FileParseResult(
+                            "⚠️ 文件解析失败：文件过大（" + (bytes.length / 1024 / 1024) + "MB），最大支持 10MB",
+                            List.of(), fileName);
+                }
+
+                return fileParserRegistry.parse(bytes, fileName);
+            } catch (Exception e) {
+                log.error("failed to parse file: '{}'", fileName, e);
+                return new FileParseResult(
+                        "⚠️ 文件解析失败：" + e.getMessage(),
+                        List.of(), fileName);
+            }
+        }
+        return null;
+    }
+
+    private static long parseFileLen(String lenStr) {
+        if (lenStr == null || lenStr.isBlank()) {
+            return 0;
+        }
+        try {
+            return Long.parseLong(lenStr.trim());
+        } catch (NumberFormatException e) {
+            log.debug("cannot parse file len string: {}", lenStr);
+            return 0;
+        }
+    }
+
+    /**
+     * 为文件解析结果添加来源标注，让编排大模型明确知道内容的来源和处理状态。
+     */
+    private String annotateFileContent(FileParseResult fileResult, String userText) {
+        StringBuilder annotated = new StringBuilder();
+        String ext = FileParserRegistry.extractExtension(fileResult.fileName());
+        String typeDesc = fileTypeDescription(ext);
+        boolean isAudio = ext != null && (ext.equals("mp3") || ext.equals("wav") || ext.equals("m4a")
+                || ext.equals("ogg") || ext.equals("flac") || ext.equals("wma") || ext.equals("aac") || ext.equals("opus"));
+
+        // 文件来源标注
+        annotated.append("【用户上传文件】").append(fileResult.fileName());
+        if (typeDesc != null && !typeDesc.isBlank()) {
+            annotated.append("（").append(typeDesc).append("）");
+        }
+
+        if (fileResult.text() != null && !fileResult.text().isBlank()) {
+            if (isAudio) {
+                annotated.append("\n语音识别结果：\n").append(fileResult.text());
+            } else {
+                annotated.append("\n文档内容：\n").append(fileResult.text());
+            }
+        } else {
+            annotated.append("\n（文件无文字内容）");
+        }
+
+        if (!fileResult.images().isEmpty()) {
+            annotated.append("\n（文档包含 ").append(fileResult.images().size()).append(" 张嵌入图片，已提取并附带在消息中）");
+        }
+
+        // 用户额外消息
+        if (userText != null && !userText.isBlank()) {
+            annotated.append("\n\n---\n【用户消息】\n").append(userText);
+        }
+
+        return annotated.toString();
+    }
+
+    private static String fileTypeDescription(String extension) {
+        if (extension == null) {
+            return null;
+        }
+        return switch (extension) {
+            case "docx", "doc" -> "Word文档";
+            case "pdf" -> "PDF文档";
+            case "txt" -> "纯文本文件";
+            case "csv" -> "CSV表格";
+            case "json" -> "JSON数据";
+            case "xml" -> "XML数据";
+            case "md" -> "Markdown";
+            case "log" -> "日志文件";
+            case "mp3" -> "MP3音频";
+            case "wav" -> "WAV音频";
+            case "m4a" -> "M4A音频";
+            case "ogg" -> "OGG音频";
+            case "flac" -> "FLAC音频";
+            case "wma" -> "WMA音频";
+            case "aac" -> "AAC音频";
+            case "opus" -> "Opus音频";
+            default -> null;
+        };
+    }
+
+    /**
+     * 将文件中的嵌入图片压缩并转为 base64 data URI。
+     */
+    private List<String> compressFileImages(List<byte[]> images) {
+        if (images == null || images.isEmpty()) {
+            return List.of();
+        }
+        List<String> uris = new ArrayList<>();
+        for (byte[] raw : images) {
+            try {
+                byte[] compressed = compressImage(raw);
+                String dataUri = "data:image/jpeg;base64," + Base64.getEncoder().encodeToString(compressed);
+                uris.add(dataUri);
+            } catch (Exception e) {
+                log.error("failed to compress file image", e);
+            }
+        }
+        return uris;
     }
 }

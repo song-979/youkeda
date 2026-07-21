@@ -87,12 +87,46 @@ public class InMemoryConversationMemory implements ConversationMemory {
         log.debug("history cleared for user={}", userId);
     }
 
+    @Override
+    public void rememberImageContext(String userId, List<String> imageBase64Urls, String summary) {
+        if (userId == null || userId.isBlank() || imageBase64Urls == null || imageBase64Urls.isEmpty()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        UserSlot slot = store.computeIfAbsent(userId, k -> new UserSlot(now));
+        slot.lastAccess = now;
+        slot.latestImageDataUrls = List.copyOf(imageBase64Urls);
+        slot.latestImageSummary = summary;
+    }
+
+    @Override
+    public List<String> getLatestImageDataUrls(String userId) {
+        UserSlot slot = store.get(userId);
+        if (slot == null || isExpired(slot) || slot.latestImageDataUrls == null || slot.latestImageDataUrls.isEmpty()) {
+            return List.of();
+        }
+        slot.lastAccess = System.currentTimeMillis();
+        return List.copyOf(slot.latestImageDataUrls);
+    }
+
+    @Override
+    public String getLatestImageSummary(String userId) {
+        UserSlot slot = store.get(userId);
+        if (slot == null || isExpired(slot)) {
+            return null;
+        }
+        slot.lastAccess = System.currentTimeMillis();
+        return slot.latestImageSummary;
+    }
+
     private boolean isExpired(UserSlot slot) {
         return System.currentTimeMillis() - slot.lastAccess > ttlMillis;
     }
 
     private static class UserSlot {
         final Deque<ChatRequest.Message> messages = new ArrayDeque<>();
+        volatile List<String> latestImageDataUrls;
+        volatile String latestImageSummary;
         volatile long lastAccess;
 
         UserSlot(long lastAccess) {
