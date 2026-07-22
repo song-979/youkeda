@@ -1,13 +1,12 @@
 package com.youkeda.project.wechatproject.bot.tool;
 
-import com.youkeda.project.wechatproject.bot.tool.ToolService.SystemTools;
-import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
-import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolRuntime;
-import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
 import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
 import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentResult;
 import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentTask;
 import com.youkeda.project.wechatproject.bot.service.OrchestrationService.ChatAgent;
+import com.youkeda.project.wechatproject.bot.tool.ToolService.SystemTools;
+import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
+import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolRuntime;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -46,6 +45,7 @@ class ToolServiceTests {
     @Test
     void wiresProjectToolsWithoutRequiringOuterLoopChanges() {
         assertThat(toolRuntime.tools()).hasAtLeastOneElementOfType(SystemTools.class);
+        assertThat(toolRuntime.tools()).hasAtLeastOneElementOfType(WeatherTools.class);
         assertThat(toolRuntime.asSpringAiTools()).isNotEmpty();
         assertThat(context.getBeansOfType(ToolChatClientFactory.class)).hasSize(1);
     }
@@ -79,7 +79,7 @@ class ToolServiceTests {
         when(requestSpec.call()).thenReturn(callSpec);
         when(callSpec.content()).thenReturn("tool-loop-response");
 
-        ChatAgent chatAgent = new ChatAgent(legacyClient, agentProperties(), testFactory(toolChatClient));
+        ChatAgent chatAgent = new ChatAgent(legacyClient, null, testFactory(toolChatClient));
 
         AgentResult result = chatAgent.execute(new AgentTask("CHAT", "现在几点", Map.of()));
 
@@ -95,7 +95,7 @@ class ToolServiceTests {
 
         when(legacyClient.chatStream("看图", imageUrls, List.of())).thenReturn("legacy-response");
 
-        ChatAgent chatAgent = new ChatAgent(legacyClient, agentProperties(), testFactory(toolChatClient));
+        ChatAgent chatAgent = new ChatAgent(legacyClient, null, testFactory(toolChatClient));
 
         AgentResult result = chatAgent.execute(new AgentTask("CHAT", "看图", Map.of("imageUrls", imageUrls)));
 
@@ -107,15 +107,9 @@ class ToolServiceTests {
     void chatAgentAdvertisesGenericToolAbilityOnly() {
         ChatAgent chatAgent = new ChatAgent(mock(AiModelClient.class));
 
-        assertThat(chatAgent.getCapability().strengths()).contains("runtime-tools");
-        assertThat(chatAgent.getCapability().description()).contains("internal tool loop");
+        assertThat(chatAgent.getCapability().strengths()).contains("tool-use");
+        assertThat(chatAgent.getCapability().description()).contains("tool-assisted");
         assertThat(chatAgent.getCapability().description()).doesNotContain("get_current_datetime");
-    }
-
-    private static AgentProperties agentProperties() {
-        AgentProperties properties = new AgentProperties();
-        properties.setSystemPrompt("test system prompt");
-        return properties;
     }
 
     private static ToolChatClientFactory testFactory(ChatClient chatClient) {
