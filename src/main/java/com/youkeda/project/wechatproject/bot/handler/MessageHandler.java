@@ -109,7 +109,7 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
 
         if (text.isBlank()) {
             if (!imageBase64Urls.isEmpty()) {
-                text = "【用户发送了图片】\n请描述你在这张图片中看到的内容。";
+                text = "【用户发送了图片，但未说明要做什么。请根据图片内容询问用户需求。】";
             } else {
                 String voiceText = extractVoiceText(items);
                 if (voiceText != null && !voiceText.isBlank()) {
@@ -542,4 +542,5 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         }
         return uris;
     }
+
 }
