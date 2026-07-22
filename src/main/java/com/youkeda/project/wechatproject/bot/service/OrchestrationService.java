@@ -11,6 +11,12 @@ import com.youkeda.project.wechatproject.bot.service.VoiceService.TextToSpeechCl
 import com.youkeda.project.wechatproject.bot.service.VoiceService.TtsResult;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceCatalog;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceProfile;
+import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -382,9 +388,18 @@ public final class OrchestrationService {
 
         private static final Logger log = LoggerFactory.getLogger(ChatAgent.class);
         private final AiModelClient chatClient;
+        private final AgentProperties agentProperties;
+        private final ChatClient toolChatClient;
 
         public ChatAgent(AiModelClient chatClient) {
+            this(chatClient, null, null);
+        }
+
+        public ChatAgent(AiModelClient chatClient, AgentProperties agentProperties,
+                         ToolChatClientFactory toolChatClientFactory) {
             this.chatClient = chatClient;
+            this.agentProperties = agentProperties;
+            this.toolChatClient = toolChatClientFactory != null ? toolChatClientFactory.create() : null;
         }
 
         @Override
@@ -396,8 +411,8 @@ public final class OrchestrationService {
         public AgentCapability getCapability() {
             return new AgentCapability(
                     "chat-generation",
-                    "Handles dialogue, writing, analysis, and vision-language responses.",
-                    List.of("dialogue", "writing", "analysis", "vision"),
+                    "Handles dialogue, writing, analysis, vision-language responses, and tool-assisted runtime tasks through its internal tool loop.",
+                    List.of("dialogue", "writing", "analysis", "vision", "runtime-tools"),
                     "text"
             );
         }
@@ -409,9 +424,67 @@ public final class OrchestrationService {
             List<String> imageUrls = stringList(task.parameters().get("imageUrls"));
             List<ChatRequest.Message> history = historyList(task.parameters().get("history"));
 
-            String response = chatClient.chatStream(task.instruction(), imageUrls, history);
+            String response = canUseToolLoop(imageUrls)
+                    ? chatWithTools(task.instruction(), history)
+                    : chatClient.chatStream(task.instruction(), imageUrls, history);
             log.info("ChatAgent response: {} chars", response != null ? response.length() : 0);
             return AgentResult.success(task.taskId(), response, response);
+        }
+
+        private boolean canUseToolLoop(List<String> imageUrls) {
+            return toolChatClient != null && (imageUrls == null || imageUrls.isEmpty());
+        }
+
+        private String chatWithTools(String instruction, List<ChatRequest.Message> history) throws IOException {
+            try {
+                return toolChatClient.prompt()
+                        .messages(toSpringAiMessages(instruction, history))
+                        .call()
+                        .content();
+            } catch (RuntimeException e) {
+                log.warn("ChatAgent tool loop failed, falling back to legacy chat client: {}", e.getMessage());
+                return chatClient.chatStream(instruction, List.of(), history);
+            }
+        }
+
+        private List<Message> toSpringAiMessages(String instruction, List<ChatRequest.Message> history) {
+            List<Message> messages = new ArrayList<>();
+            String systemPrompt = agentProperties != null ? agentProperties.getSystemPrompt() : null;
+            if (systemPrompt != null && !systemPrompt.isBlank()) {
+                messages.add(new SystemMessage(systemPrompt));
+            }
+            if (history != null && !history.isEmpty()) {
+                for (ChatRequest.Message historyMessage : history) {
+                    Message message = toSpringAiMessage(historyMessage);
+                    if (message != null) {
+                        messages.add(message);
+                    }
+                }
+            }
+            messages.add(new UserMessage(instruction != null ? instruction : ""));
+            return messages;
+        }
+
+        private static Message toSpringAiMessage(ChatRequest.Message historyMessage) {
+            if (historyMessage == null) {
+                return null;
+            }
+            String content = contentAsText(historyMessage.getContent());
+            if (content == null || content.isBlank()) {
+                return null;
+            }
+            String role = historyMessage.getRole() != null
+                    ? historyMessage.getRole().toLowerCase(Locale.ROOT)
+                    : "";
+            return switch (role) {
+                case "system" -> new SystemMessage(content);
+                case "assistant" -> new AssistantMessage(content);
+                default -> new UserMessage(content);
+            };
+        }
+
+        private static String contentAsText(Object content) {
+            return content == null ? null : content instanceof String text ? text : String.valueOf(content);
         }
 
         private static List<String> stringList(Object value) {
@@ -600,7 +673,7 @@ public final class OrchestrationService {
     public interface OrchestratorAgent {
         OrchestrationResult plan(UserRequest request);
 
-        OrchestrationResult reflect(TaskScratchpad scratchpad);
+        OrchestrationResult reflect(TaskScratchpad scratchpad, UserRequest originalRequest);
     }
 
     @ConfigurationProperties(prefix = "agent.orchestrator")
@@ -666,6 +739,19 @@ public final class OrchestrationService {
                 }
             }
             return null;
+        }
+
+        public List<String> allSuccessfulChatTexts() {
+            List<String> texts = new ArrayList<>();
+            for (ExecutionRecord r : records) {
+                if ("CHAT".equals(r.task().agentType())
+                        && r.result().status() == AgentResult.Status.SUCCESS
+                        && r.result().rawOutput() != null
+                        && !r.result().rawOutput().isEmpty()) {
+                    texts.add(r.result().rawOutput());
+                }
+            }
+            return texts;
         }
 
         public String lastSuccessfulImageSummary() {
@@ -756,17 +842,20 @@ public final class OrchestrationService {
                 Core principle — when to route vs answer directly:
                 - You are the most knowledgeable component. Your prompt contains ALL capability/voice information.
                 - If the user asks an informational question you can answer from your prompt context (e.g. available voices, what features are supported, how something works), return completed with your answer directly. Do NOT route these to CHAT.
+                - You do NOT execute tools yourself. CHAT may use an internal tool-calling loop for runtime information, system/environment lookups, and future integrations.
+                - If the request requires runtime information, external actions, integration data, or a capability that may exist as an internal tool, route to CHAT. Do not claim the system cannot do it just because the tool list is not shown to you; CHAT will answer normally if a tool exists and explain the limitation if no suitable tool exists.
                 - Only route to sub-agents when their unique capability is needed:
-                  * CHAT: content generation (creative writing, analysis of user-provided images, open-ended conversation, generating text that will be spoken, AND generating file content — see file generation rules below)
+                  * CHAT: content generation (creative writing, analysis of user-provided images, open-ended conversation, generating text that will be spoken, tool-assisted runtime tasks, AND generating file content — see file generation rules below)
                   * IMAGE_GEN: generating new images
                   * SPEECH_GEN: converting text to audio/speech
 
                 File generation rules (via CHAT):
                 - When the user asks to generate, export, save, download, or create a file (e.g. Markdown doc, report, summary, data export, weekly report, code file, etc.), route to CHAT.
-                - The CHAT agent must output the file content wrapped in a structured marker:
+                - CRITICAL: When creating a CHAT task for file generation, your instruction MUST explicitly include the output format requirement. Tell CHAT to wrap the file content in markers:
                   [FILE:filename.ext]
                   file content here...
                   [/FILE]
+                - Example CHAT instruction for file generation: "请根据对话历史总结今天的内容，生成一个Markdown文档。你必须使用 [FILE:对话总结.md] 和 [/FILE] 标记包裹文件内容，[/FILE] 之后可附加简短说明。"
                 - After the [/FILE] marker, the CHAT agent may include an optional plain-text response (e.g. "文件已生成"). This text will be sent alongside the file.
                 - Supported file extensions: txt, md, json, csv, html, xml, log, docx. Choose the extension based on what the user asked for (e.g. .md for markdown documents, .docx for Word documents, .csv for tabular data, .json for structured data).
                 - The filename should be descriptive and match the user's request (e.g. 周报.md, 数据分析报告.docx, 用户列表.csv).
@@ -790,6 +879,7 @@ public final class OrchestrationService {
                 - For voice messages: treat the transcription as user input and route to CHAT normally.
                 - For SPEECH_GEN tasks:
                   * instruction MUST contain ONLY the raw text to speak. No narration, no stage directions, no "请朗读", no "停顿一秒", no markup of any kind. It will be sent verbatim to a TTS engine.
+                  * IMPORTANT: If the text to speak depends on a prior CHAT task's output (e.g. "write a poem then recite it", "generate copy then read it aloud"), use the placeholder {{LAST_CHAT_TEXT}} as the instruction. The system will automatically replace it with the actual text from the last successful CHAT task.
                   * Detect the user's emotional state from conversation context.
                   * Choose a voice that matches the user's mood and the content (see voice list and mood mapping above).
                   * Set the voice via a "voice" parameter (use the exact voice ID).
@@ -805,6 +895,7 @@ public final class OrchestrationService {
 
         private static final String REFLECT_SYSTEM_PROMPT = """
                 You are reviewing completed subtask results for a multi-agent assistant.
+                The prompt includes the ORIGINAL USER REQUEST first, followed by the subtask execution records.
                 Return JSON only, with no markdown and no extra text.
 
                 Available agent units:
@@ -815,12 +906,14 @@ public final class OrchestrationService {
                 - execute: more tasks are required
 
                 Rules:
-                - If the task results already satisfy the request, return completed.
+                - Compare the execution results against the original user request. Check whether EVERY part of the request has been addressed.
+                - If the task results already satisfy ALL parts of the request, return completed.
                 - If another step is needed, return execute with the next task list.
                 - Prefer using the actual CHAT output as final_reply when it already answers the user.
                 - If image or speech generation already succeeded, do not ask to regenerate unless there is a clear failure.
                 - For new SPEECH_GEN tasks, follow the same voice selection rules as in planning.
                 - For SPEECH_GEN tasks: instruction must be ONLY raw text to speak, no directions or markup.
+                  * If the text to speak depends on a prior CHAT task's output, use the placeholder {{LAST_CHAT_TEXT}}. The system will automatically replace it with the actual CHAT output text.
                 - If the user asked for a file and the CHAT output contains [FILE:...]...[/FILE] markers, the file was already generated successfully — do not route again.
                 - You may include an optional "parameters" object on each task.
 
@@ -893,19 +986,31 @@ public final class OrchestrationService {
         }
 
         @Override
-        public OrchestrationResult reflect(TaskScratchpad scratchpad) {
+        public OrchestrationResult reflect(TaskScratchpad scratchpad, UserRequest originalRequest) {
             try {
-                return doReflect(scratchpad);
+                return doReflect(scratchpad, originalRequest);
             } catch (Exception e) {
                 log.warn("Orchestrator reflect() failed, treating as completed. error={}", e.getMessage());
                 return buildCompletedResult(scratchpad);
             }
         }
 
-        private OrchestrationResult doReflect(TaskScratchpad scratchpad) {
+        private OrchestrationResult doReflect(TaskScratchpad scratchpad, UserRequest originalRequest) {
+            StringBuilder reflectContent = new StringBuilder();
+            reflectContent.append("=== ORIGINAL USER REQUEST ===\n");
+            reflectContent.append(originalRequest.text() != null ? originalRequest.text() : "");
+            if (!originalRequest.imageBase64Urls().isEmpty()) {
+                reflectContent.append("\n[user attached images: ").append(originalRequest.imageBase64Urls().size()).append("]");
+            }
+            if (originalRequest.rememberedImageSummary() != null && !originalRequest.rememberedImageSummary().isBlank()) {
+                reflectContent.append("\n[remembered image summary] ").append(originalRequest.rememberedImageSummary());
+            }
+            reflectContent.append("\n\n");
+            reflectContent.append(scratchpad.toReflectPrompt());
+
             List<Map<String, Object>> messages = new ArrayList<>();
             messages.add(Map.of("role", "system", "content", String.format(REFLECT_SYSTEM_PROMPT, capabilitiesPrompt)));
-            messages.add(Map.of("role", "user", "content", scratchpad.toReflectPrompt()));
+            messages.add(Map.of("role", "user", "content", reflectContent.toString()));
 
             String response = callModel(messages);
             return parseReflectResponse(response, scratchpad);
@@ -916,7 +1021,7 @@ public final class OrchestrationService {
             body.put("model", model);
             body.put("messages", messages);
             body.put("temperature", 0.0);
-            body.put("max_tokens", 800);
+            body.put("max_tokens", 2000);
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
@@ -1202,7 +1307,7 @@ public final class OrchestrationService {
                     break;
                 }
 
-                result = orchestrator.reflect(result.scratchpad());
+                result = orchestrator.reflect(result.scratchpad(), request);
                 log.info("orchestrator reflect: status={}, reasoning={}", result.status(), result.reasoning());
 
                 if (result.status() == OrchestrationResult.Status.NEEDS_CLARIFICATION) {
@@ -1366,9 +1471,10 @@ public final class OrchestrationService {
         }
 
         private String determineMemoryText(OrchestrationResult result, ModelReply finalReply) {
-            String chatText = result.scratchpad().lastSuccessfulChatText();
-            if (chatText != null && !chatText.isBlank()) {
-                return chatText;
+            // Concatenate ALL successful CHAT outputs (multi-task requests produce multiple CHAT results)
+            List<String> allChatTexts = result.scratchpad().allSuccessfulChatTexts();
+            if (!allChatTexts.isEmpty()) {
+                return String.join("\n\n---\n\n", allChatTexts);
             }
 
             if (finalReply != null && finalReply.getTextContent() != null && !finalReply.getTextContent().isBlank()) {
@@ -1539,12 +1645,16 @@ public final class OrchestrationService {
             boolean asksSpeech = containsAny(text,
                     "\u8bed\u97f3",
                     "\u6717\u8bfb",
+                    "\u6717\u8bf5",
                     "\u5ff5\u7ed9\u6211\u542c",
                     "\u8bfb\u7ed9\u6211\u542c",
                     "\u8bb2\u7ed9\u6211\u542c",
                     "\u8bf4\u51fa\u6765",
                     "\u8bfb\u51fa\u6765",
                     "\u5e2e\u6211\u8bfb",
+                    "\u5e2e\u6211\u5ff5",
+                    "\u64ad\u62a5",
+                    "\u5ff5\u4e00\u4e0b",
                     "tts");
 
             boolean asksCopy = containsAny(text,

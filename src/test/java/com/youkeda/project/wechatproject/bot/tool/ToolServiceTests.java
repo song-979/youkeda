@@ -3,7 +3,13 @@ package com.youkeda.project.wechatproject.bot.tool;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.SystemTools;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolRuntime;
+import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
+import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
+import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentResult;
+import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentTask;
+import com.youkeda.project.wechatproject.bot.service.OrchestrationService.ChatAgent;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
@@ -12,8 +18,15 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @SpringBootTest(properties = {
         "ilink.enabled=false",
@@ -52,5 +65,65 @@ class ToolServiceTests {
                         .doesNotContain("TaskScratchpad");
             }
         }
+    }
+
+    @Test
+    void chatAgentUsesToolLoopForTextTasks() throws IOException {
+        AiModelClient legacyClient = mock(AiModelClient.class);
+        ChatClient toolChatClient = mock(ChatClient.class);
+        ChatClient.ChatClientRequestSpec requestSpec = mock(ChatClient.ChatClientRequestSpec.class);
+        ChatClient.CallResponseSpec callSpec = mock(ChatClient.CallResponseSpec.class);
+
+        when(toolChatClient.prompt()).thenReturn(requestSpec);
+        when(requestSpec.messages(anyList())).thenReturn(requestSpec);
+        when(requestSpec.call()).thenReturn(callSpec);
+        when(callSpec.content()).thenReturn("tool-loop-response");
+
+        ChatAgent chatAgent = new ChatAgent(legacyClient, agentProperties(), testFactory(toolChatClient));
+
+        AgentResult result = chatAgent.execute(new AgentTask("CHAT", "现在几点", Map.of()));
+
+        assertThat(result.output()).isEqualTo("tool-loop-response");
+        verify(legacyClient, never()).chatStream("现在几点", List.of(), List.of());
+    }
+
+    @Test
+    void chatAgentKeepsLegacyClientForImageTasks() throws IOException {
+        AiModelClient legacyClient = mock(AiModelClient.class);
+        ChatClient toolChatClient = mock(ChatClient.class);
+        List<String> imageUrls = List.of("data:image/png;base64,abc");
+
+        when(legacyClient.chatStream("看图", imageUrls, List.of())).thenReturn("legacy-response");
+
+        ChatAgent chatAgent = new ChatAgent(legacyClient, agentProperties(), testFactory(toolChatClient));
+
+        AgentResult result = chatAgent.execute(new AgentTask("CHAT", "看图", Map.of("imageUrls", imageUrls)));
+
+        assertThat(result.output()).isEqualTo("legacy-response");
+        verify(toolChatClient, never()).prompt();
+    }
+
+    @Test
+    void chatAgentAdvertisesGenericToolAbilityOnly() {
+        ChatAgent chatAgent = new ChatAgent(mock(AiModelClient.class));
+
+        assertThat(chatAgent.getCapability().strengths()).contains("runtime-tools");
+        assertThat(chatAgent.getCapability().description()).contains("internal tool loop");
+        assertThat(chatAgent.getCapability().description()).doesNotContain("get_current_datetime");
+    }
+
+    private static AgentProperties agentProperties() {
+        AgentProperties properties = new AgentProperties();
+        properties.setSystemPrompt("test system prompt");
+        return properties;
+    }
+
+    private static ToolChatClientFactory testFactory(ChatClient chatClient) {
+        return new ToolChatClientFactory(null, null) {
+            @Override
+            public ChatClient create() {
+                return chatClient;
+            }
+        };
     }
 }

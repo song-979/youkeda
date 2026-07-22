@@ -31,6 +31,7 @@ import com.youkeda.project.wechatproject.bot.service.VoiceService.SpeechProperti
 import com.youkeda.project.wechatproject.bot.service.VoiceService.SpeechToTextClient;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.TextToSpeechClient;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceCatalog;
+import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -139,9 +140,11 @@ public class BotAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public ChatAgent chatAgent(AiModelClient aiModelClient) {
+    public ChatAgent chatAgent(AiModelClient aiModelClient,
+                               AgentProperties props,
+                               ObjectProvider<ToolChatClientFactory> toolChatClientFactoryProvider) {
         log.info("creating ChatAgent");
-        return new ChatAgent(aiModelClient);
+        return new ChatAgent(aiModelClient, props, toolChatClientFactoryProvider.getIfAvailable());
     }
 
     @Bean
