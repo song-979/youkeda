@@ -22,6 +22,8 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -76,6 +78,7 @@ class ToolServiceTests {
 
         when(toolChatClient.prompt()).thenReturn(requestSpec);
         when(requestSpec.messages(anyList())).thenReturn(requestSpec);
+        when(requestSpec.toolContext(anyMap())).thenReturn(requestSpec);
         when(requestSpec.call()).thenReturn(callSpec);
         when(callSpec.content()).thenReturn("tool-loop-response");
 
@@ -88,27 +91,34 @@ class ToolServiceTests {
     }
 
     @Test
-    void chatAgentKeepsLegacyClientForImageTasks() throws IOException {
+    void chatAgentUsesToolLoopWithImagesWhenAvailable() throws IOException {
         AiModelClient legacyClient = mock(AiModelClient.class);
         ChatClient toolChatClient = mock(ChatClient.class);
         List<String> imageUrls = List.of("data:image/png;base64,abc");
 
-        when(legacyClient.chatStream("看图", imageUrls, List.of())).thenReturn("legacy-response");
+        ChatClient.ChatClientRequestSpec requestSpec = mock(ChatClient.ChatClientRequestSpec.class);
+        ChatClient.CallResponseSpec responseSpec = mock(ChatClient.CallResponseSpec.class);
+        when(toolChatClient.prompt()).thenReturn(requestSpec);
+        when(requestSpec.messages(anyList())).thenReturn(requestSpec);
+        when(requestSpec.toolContext(anyMap())).thenReturn(requestSpec);
+        when(requestSpec.call()).thenReturn(responseSpec);
+        when(responseSpec.content()).thenReturn("tool-loop-response");
 
         ChatAgent chatAgent = new ChatAgent(legacyClient, null, testFactory(toolChatClient));
 
         AgentResult result = chatAgent.execute(new AgentTask("CHAT", "看图", Map.of("imageUrls", imageUrls)));
 
-        assertThat(result.output()).isEqualTo("legacy-response");
-        verify(toolChatClient, never()).prompt();
+        assertThat(result.output()).isEqualTo("tool-loop-response");
+        verify(toolChatClient).prompt();
+        verify(legacyClient, never()).chatStream(anyString(), anyList(), anyList());
     }
 
     @Test
     void chatAgentAdvertisesGenericToolAbilityOnly() {
         ChatAgent chatAgent = new ChatAgent(mock(AiModelClient.class));
 
-        assertThat(chatAgent.getCapability().strengths()).contains("tool-use");
-        assertThat(chatAgent.getCapability().description()).contains("tool-assisted");
+        assertThat(chatAgent.getCapability().strengths()).contains("runtime-tools");
+        assertThat(chatAgent.getCapability().description()).contains("tool-assisted runtime tasks");
         assertThat(chatAgent.getCapability().description()).doesNotContain("get_current_datetime");
     }
 

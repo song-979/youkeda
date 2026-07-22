@@ -17,6 +17,9 @@ import java.util.Map;
 public class WeatherTools implements ToolService.ProjectTool {
 
     private static final Logger log = LoggerFactory.getLogger(WeatherTools.class);
+
+    @Override
+    public String category() { return "information"; }
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final String DISTRICT_URL = "https://restapi.amap.com/v3/config/district";
     private static final String WEATHER_URL = "https://restapi.amap.com/v3/weather/weatherInfo";
