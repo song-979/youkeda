@@ -23,9 +23,13 @@ import java.util.List;
  * should only consume ToolRuntime or ToolChatClientFactory when it needs tools.
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties(ToolService.ToolProperties.class)
+@EnableConfigurationProperties({
+        ToolService.ToolProperties.class,
+        WeatherTools.WeatherProperties.class
+})
 @ConditionalOnProperty(prefix = "agent.tools", name = "enabled", havingValue = "true", matchIfMissing = true)
-public class ToolService {
+public class
+ToolService {
 
     @Bean
     @ConditionalOnMissingBean
@@ -44,6 +48,13 @@ public class ToolService {
     @ConditionalOnProperty(prefix = "agent.tools.system", name = "enabled", havingValue = "true", matchIfMissing = true)
     public SystemTools systemTools() {
         return new SystemTools();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.weather", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public WeatherTools weatherTools(WeatherTools.WeatherProperties weatherProperties) {
+        return new WeatherTools(weatherProperties);
     }
 
     public interface ProjectTool {
