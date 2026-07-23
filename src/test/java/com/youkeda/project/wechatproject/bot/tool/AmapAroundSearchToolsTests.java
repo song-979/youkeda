@@ -25,7 +25,7 @@ class AmapAroundSearchToolsTests {
                 .andExpect(queryParam("sortrule", "distance"))
                 .andExpect(queryParam("extensions", "base"))
                 .andExpect(queryParam("output", "JSON"))
-                .andExpect(queryParam("keywords", "\u5496\u5561"))
+                .andExpect(queryParam("keywords", "%E5%92%96%E5%95%A1"))
                 .andExpect(queryParam("types", "050000"))
                 .andRespond(withSuccess("""
                         {
@@ -47,7 +47,15 @@ class AmapAroundSearchToolsTests {
                         }
                         """, MediaType.APPLICATION_JSON));
 
-        String result = new AmapAroundSearchTools(restTemplate)
+        AmapStaticMapTools staticMapTools = new AmapStaticMapTools("") {
+            @Override
+            public String generateStaticMap(String location, Integer zoom, String size, Integer scale,
+                                            String markers, String labels, String paths, Boolean traffic) {
+                return "static map generated";
+            }
+        };
+
+        String result = new AmapAroundSearchTools(restTemplate, staticMapTools, "")
                 .searchPlacesAround("120.143222,30.236064", "\u5496\u5561", "050000", 1500, 5);
 
         assertThat(result)
@@ -59,12 +67,8 @@ class AmapAroundSearchToolsTests {
                 .contains("\u533a\u57df\uff1a\u6d59\u6c5f\u7701\uff0c\u676d\u5dde\u5e02\uff0c\u897f\u6e56\u533a")
                 .contains("adcode\uff1a330106")
                 .contains("\u5750\u6807\uff1a120.140000,30.240000")
-                .contains("\u5df2\u6839\u636e\u641c\u7d22\u534a\u5f84\u81ea\u52a8\u8c03\u6574\u5730\u56fe\u7ea7\u522b\uff1azoom=14")
-                .contains("\u9ad8\u5fb7\u9759\u6001\u5730\u56fe")
-                .contains("https://restapi.amap.com/v3/staticmap")
-                .contains("location=120.143222,30.236064")
-                .contains("zoom=14")
-                .contains("markers=large,0xFF0000,A:120.143222,30.236064");
+                .contains("\u9759\u6001\u5730\u56fe\u5df2\u751f\u6210")
+                .contains("zoom=14");
         server.verify();
     }
 }
