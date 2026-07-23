@@ -385,13 +385,64 @@ public class AutomationRuntime implements InitializingBean {
             } catch (Exception e) {
                 lastError = e;
                 log.warn("reminder dispatch failed: id={}, attempt={}/{}", reminderId, i, attempts, e);
+                if (isRetryableError(e) && i < attempts) {
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
             }
         }
-        store.saveReminder(copyReminder(
-                triggering,
-                AutomationStore.ReminderStatus.FAILED,
-                lastError != null ? lastError.getMessage() : "send failed",
-                attempts));
+
+        if (isRetryableError(lastError)) {
+            store.saveReminder(copyReminder(
+                    triggering,
+                    AutomationStore.ReminderStatus.PENDING,
+                    "waiting for context refresh: " + (lastError != null ? lastError.getMessage() : "send failed"),
+                    0));
+            log.info("reminder {} kept PENDING due to retryable error, will retry on next incoming message", reminderId);
+        } else {
+            store.saveReminder(copyReminder(
+                    triggering,
+                    AutomationStore.ReminderStatus.FAILED,
+                    lastError != null ? lastError.getMessage() : "send failed",
+                    attempts));
+        }
+    }
+
+    private static boolean isRetryableError(Exception e) {
+        if (e == null) {
+            return false;
+        }
+        String msg = e.getMessage();
+        return msg != null && (msg.contains("context token") || msg.contains("contextToken"));
+    }
+
+    public void retryOverduePendingReminders() {
+        String recipientId = resolveRecipientId();
+        if (recipientId == null) {
+            return;
+        }
+        retryOverduePendingReminders(recipientId);
+    }
+
+    public void retryOverduePendingReminders(String triggeredByUserId) {
+        if (triggeredByUserId == null || triggeredByUserId.isBlank()) {
+            return;
+        }
+        String recipientId = resolveRecipientId();
+        if (recipientId == null || !recipientId.equals(triggeredByUserId)) {
+            return;
+        }
+        Instant now = clock.instant();
+        for (AutomationStore.Reminder reminder : store.listReminders(AutomationStore.ReminderStatus.PENDING)) {
+            if (!reminder.remindAt().isAfter(now)) {
+                log.info("retrying overdue pending reminder: id={}, title={}", reminder.id(), reminder.title());
+                triggerReminder(reminder.id());
+            }
+        }
     }
 
     private void reschedulePendingReminders() {

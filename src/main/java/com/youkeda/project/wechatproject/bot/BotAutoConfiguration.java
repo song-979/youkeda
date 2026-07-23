@@ -4,6 +4,7 @@ import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
 import com.github.wechat.ilink.sdk.core.listener.OnLoginListener;
 import com.youkeda.project.wechatproject.bot.handler.MessageHandler;
+import com.youkeda.project.wechatproject.bot.tool.AutomationRuntime;
 import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
 import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.DashScopeImageGenClient;
@@ -12,6 +13,7 @@ import com.youkeda.project.wechatproject.bot.service.AiService.OpenAiCompatibleC
 import com.youkeda.project.wechatproject.bot.service.BotService.IlinkClientLifecycle;
 import com.youkeda.project.wechatproject.bot.service.BotService.IlinkProperties;
 import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
+
 import com.youkeda.project.wechatproject.bot.service.DocumentService;
 import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentRegistry;
 import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentUnit;
@@ -241,9 +243,11 @@ public class BotAutoConfiguration {
                                          MessageRouter messageRouter,
                                          ObjectProvider<SpeechToTextClient> sttClientProvider,
                                          ObjectProvider<AudioConverter> audioConverterProvider,
-                                         DocumentService documentService) {
+                                         DocumentService documentService,
+                                         ObjectProvider<AutomationRuntime> automationRuntimeProvider) {
         log.info("creating MessageHandler");
         return new MessageHandler(ilinkClient, messageBridge, messageRouter,
-                sttClientProvider.getIfAvailable(), audioConverterProvider.getIfAvailable(), documentService);
+                sttClientProvider.getIfAvailable(), audioConverterProvider.getIfAvailable(), documentService,
+                automationRuntimeProvider.getIfAvailable());
     }
 }

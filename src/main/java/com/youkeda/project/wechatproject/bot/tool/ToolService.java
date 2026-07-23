@@ -169,8 +169,10 @@ public class ToolService {
         private static final Map<String, String> CATEGORY_LABELS = Map.of(
                 "information", "信息查询（时间、天气、搜索）",
                 "web_content", "网页内容获取",
-                "media_generation", "媒体生成（GIF 表情）",
-                "location", "位置与地图（地点查询、周边搜索、路线规划、静态地图）"
+                "media_generation", "媒体生成（GIF表情）",
+                "automation", "定时提醒与日程（创建提醒、定时任务、日常安排、闹钟）",
+                "local_files", "本地文件检索、读取和发送",
+                "map_navigation", "高德地图（地点搜索、周边搜索、路线规划、静态地图）"
         );
 
         private final List<ProjectTool> tools;
