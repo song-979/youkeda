@@ -1,17 +1,24 @@
 package com.youkeda.project.wechatproject.bot.tool;
 
+import com.github.wechat.ilink.sdk.ILinkClient;
+import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
+import java.nio.file.Path;
+import java.time.Clock;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -23,13 +30,15 @@ import java.util.List;
  * should only consume ToolRuntime or ToolChatClientFactory when it needs tools.
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties(ToolService.ToolProperties.class)
+@EnableConfigurationProperties({ToolService.ToolProperties.class, AutomationProperties.class})
 @ConditionalOnProperty(prefix = "agent.tools", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class ToolService {
 
     @Bean
     @ConditionalOnMissingBean
-    public ToolRuntime toolRuntime(List<ProjectTool> projectTools) {
+    public ToolRuntime toolRuntime(List<ProjectTool> projectTools,
+                                   ObjectProvider<RecipientBindingListener> recipientBindingListenerProvider) {
+        recipientBindingListenerProvider.getIfAvailable();
         return new ToolRuntime(projectTools);
     }
 
@@ -44,6 +53,66 @@ public class ToolService {
     @ConditionalOnProperty(prefix = "agent.tools.system", name = "enabled", havingValue = "true", matchIfMissing = true)
     public SystemTools systemTools() {
         return new SystemTools();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "automationTaskScheduler")
+    @ConditionalOnProperty(prefix = "agent.tools.automation", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public TaskScheduler automationTaskScheduler(AutomationProperties properties) {
+        ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setPoolSize(Math.max(1, properties.getSchedulerPoolSize()));
+        scheduler.setThreadNamePrefix("tool-automation-");
+        return scheduler;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.automation", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public AutomationStore automationStore(AutomationProperties properties) {
+        return new JsonAutomationStore(Path.of(properties.getStoragePath()));
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.automation", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public AutomationRuntime.ReminderScheduler reminderScheduler(TaskScheduler automationTaskScheduler) {
+        return new AutomationRuntime.SpringReminderScheduler(automationTaskScheduler);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.automation", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public AutomationRuntime automationRuntime(AutomationStore automationStore,
+                                               AutomationRuntime.ReminderScheduler reminderScheduler,
+                                               AutomationProperties properties,
+                                               ObjectProvider<ILinkClient> ilinkClientProvider) {
+        return new AutomationRuntime(
+                automationStore,
+                reminderScheduler,
+                (recipientId, message) -> {
+                    ILinkClient client = ilinkClientProvider.getIfAvailable();
+                    if (client == null) {
+                        throw new IllegalStateException("iLink client is not available");
+                    }
+                    client.sendText(recipientId, message);
+                },
+                properties,
+                Clock.systemDefaultZone());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.automation", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public AutomationTools automationTools(AutomationRuntime automationRuntime, AutomationProperties properties) {
+        return new AutomationTools(automationRuntime, properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.automation", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public RecipientBindingListener recipientBindingListener(AutomationStore automationStore,
+                                                             ObjectProvider<MessageBridge> messageBridgeProvider) {
+        return new RecipientBindingListener(automationStore, Clock.systemDefaultZone(), messageBridgeProvider);
     }
 
     public interface ProjectTool {
