@@ -16,6 +16,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class AmapAroundSearchTools implements ToolService.ProjectTool {
 
+    @Override
+    public String category() { return "location"; }
+
     private static final Logger log = LoggerFactory.getLogger(AmapAroundSearchTools.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final String PLACE_AROUND_URL = "https://restapi.amap.com/v3/place/around";

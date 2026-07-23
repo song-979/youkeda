@@ -12,6 +12,9 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 public class AmapPlaceIdTools implements ToolService.ProjectTool {
 
+    @Override
+    public String category() { return "location"; }
+
     private static final Logger log = LoggerFactory.getLogger(AmapPlaceIdTools.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final String PLACE_TEXT_URL = "https://restapi.amap.com/v3/place/text";
@@ -32,7 +35,7 @@ public class AmapPlaceIdTools implements ToolService.ProjectTool {
     }
 
     @Tool(name = "query_amap_place_ids",
-          description = "Search Amap POIs by keyword and return place IDs, names, addresses, adcodes, and coordinates.")
+          description = "Search Amap POIs by keyword or place name (e.g. city, address, landmark) and return place IDs, names, addresses, adcodes, and coordinates. Use this tool FIRST to convert place names into coordinates before calling other Amap tools (direction, around search, static map) that require longitude,latitude input.")
     public String queryPlaceIds(
             @ToolParam(description = "POI keyword, place name, company name, scenic spot, shop, or address to search.")
             String keywords,

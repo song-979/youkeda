@@ -42,7 +42,7 @@ public class BraveSearchTool implements ProjectTool {
     private int resultCount = 5;
 
     @Tool(name = "web_search",
-          description = "搜索互联网获取实时信息。当用户询问的问题需要最新数据、实时信息、近期事件、或超出你知识范围的事实性内容时调用此工具。你可以在查询中使用 site:域名 限定网站，使用 filetype:类型 过滤文件类型。返回包含标题、链接、摘要和发布时间的搜索结果列表。")
+          description = "搜索互联网获取实时信息。当用户询问的问题需要最新数据、实时信息、或超出你知识范围的事实性内容时调用此工具。你可以在查询中使用 site:域名 限定网站，使用 filetype:类型 过滤文件类型。注意：查询新闻资讯请使用 search_news 工具，不要用此工具搜索新闻。")
     public String webSearch(String query) {
         if (apiKey == null || apiKey.isBlank()) {
             log.warn("UAPI Search API key not configured");
