@@ -4,10 +4,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.support.CronExpression;
 
 import java.time.Clock;
+import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -48,6 +51,7 @@ public class AutomationRuntime implements InitializingBean {
     @Override
     public void afterPropertiesSet() {
         reschedulePendingReminders();
+        scheduleRecurringTasks();
     }
 
     public ReminderResult createReminder(String title, String remindAtText, String message) {
@@ -86,7 +90,8 @@ public class AutomationRuntime implements InitializingBean {
                 now,
                 now,
                 null,
-                0);
+                0,
+                null);
         store.saveReminder(reminder);
         scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
         return ReminderResult.success(reminder, "reminder created");
@@ -102,8 +107,7 @@ public class AutomationRuntime implements InitializingBean {
             return ReminderResult.failure("reminder not found: " + id);
         }
         AutomationStore.Reminder reminder = existing.get();
-        if (reminder.status() != AutomationStore.ReminderStatus.PENDING
-                && reminder.status() != AutomationStore.ReminderStatus.TRIGGERING) {
+        if (reminder.status() != AutomationStore.ReminderStatus.PENDING) {
             return ReminderResult.failure("reminder cannot be cancelled because it is " + reminder.status());
         }
         AutomationStore.Reminder cancelled = copyReminder(
@@ -114,6 +118,66 @@ public class AutomationRuntime implements InitializingBean {
         store.saveReminder(cancelled);
         scheduler.cancel(reminder.id());
         return ReminderResult.success(cancelled, "reminder cancelled");
+    }
+
+    public ReminderResult updateReminder(String id, String title, String remindAtText, String message) {
+        Optional<AutomationStore.Reminder> existing = store.findReminder(id);
+        if (existing.isEmpty()) {
+            return ReminderResult.failure("reminder not found: " + id);
+        }
+        AutomationStore.Reminder reminder = existing.get();
+        if (reminder.status() != AutomationStore.ReminderStatus.PENDING) {
+            return ReminderResult.failure("reminder cannot be updated because it is " + reminder.status());
+        }
+
+        String normalizedTitle = normalizeOptional(title, reminder.title());
+        String normalizedMessage = normalizeOptional(message, reminder.message());
+        Instant remindAt = reminder.remindAt();
+        if (remindAtText != null && !remindAtText.isBlank()) {
+            try {
+                remindAt = parseInstant(remindAtText);
+            } catch (DateTimeParseException | IllegalArgumentException e) {
+                return ReminderResult.failure("remindAt must be an ISO datetime, for example 2026-07-22T20:00:00+08:00");
+            }
+            if (!remindAt.isAfter(clock.instant())) {
+                return ReminderResult.failure("remindAt must be in the future");
+            }
+        }
+
+        AutomationStore.Reminder updated = new AutomationStore.Reminder(
+                reminder.id(),
+                normalizedTitle,
+                remindAt,
+                normalizedMessage,
+                reminder.status(),
+                reminder.createdAt(),
+                clock.instant(),
+                null,
+                reminder.sendAttempts(),
+                reminder.recurringTaskId());
+        store.saveReminder(updated);
+        scheduler.cancel(updated.id());
+        scheduler.schedule(updated, () -> triggerReminder(updated.id()));
+        return ReminderResult.success(updated, "reminder updated");
+    }
+
+    public ReminderResult deleteReminder(String id) {
+        Optional<AutomationStore.Reminder> existing = store.findReminder(id);
+        if (existing.isEmpty()) {
+            return ReminderResult.failure("reminder not found: " + id);
+        }
+        AutomationStore.Reminder reminder = existing.get();
+        if (reminder.status() == AutomationStore.ReminderStatus.TRIGGERING) {
+            return ReminderResult.failure("reminder cannot be deleted because it is TRIGGERING");
+        }
+        AutomationStore.Reminder deleted = copyReminder(
+                reminder,
+                AutomationStore.ReminderStatus.DELETED,
+                null,
+                reminder.sendAttempts());
+        store.saveReminder(deleted);
+        scheduler.cancel(reminder.id());
+        return ReminderResult.success(deleted, "reminder deleted");
     }
 
     public ScheduleResult createScheduleItem(String title, String startAtText, String endAtText, String notes) {
@@ -141,6 +205,7 @@ public class AutomationRuntime implements InitializingBean {
                 startAt,
                 endAt,
                 normalizeOptional(notes, ""),
+                AutomationStore.ScheduleItemStatus.ACTIVE,
                 now,
                 now);
         store.saveScheduleItem(item);
@@ -149,6 +214,137 @@ public class AutomationRuntime implements InitializingBean {
 
     public List<AutomationStore.ScheduleItem> listScheduleItems(String fromText, String toText) {
         return store.listScheduleItems(parseInstant(fromText), parseInstant(toText));
+    }
+
+    public List<AutomationStore.ScheduleItem> listScheduleItems(String fromText,
+                                                                String toText,
+                                                                AutomationStore.ScheduleItemStatus status) {
+        return store.listScheduleItems(parseInstant(fromText), parseInstant(toText), status);
+    }
+
+    public ScheduleResult updateScheduleItem(String id,
+                                             String title,
+                                             String startAtText,
+                                             String endAtText,
+                                             String notes,
+                                             AutomationStore.ScheduleItemStatus status) {
+        Optional<AutomationStore.ScheduleItem> existing = store.findScheduleItem(id);
+        if (existing.isEmpty()) {
+            return ScheduleResult.failure("schedule item not found: " + id);
+        }
+        AutomationStore.ScheduleItem item = existing.get();
+        Instant startAt = item.startAt();
+        Instant endAt = item.endAt();
+        try {
+            if (startAtText != null && !startAtText.isBlank()) {
+                startAt = parseInstant(startAtText);
+            }
+            if (endAtText != null && !endAtText.isBlank()) {
+                endAt = parseInstant(endAtText);
+            }
+        } catch (DateTimeParseException | IllegalArgumentException e) {
+            return ScheduleResult.failure("startAt and endAt must be ISO datetimes");
+        }
+        if (!endAt.isAfter(startAt)) {
+            return ScheduleResult.failure("endAt must be after startAt");
+        }
+        AutomationStore.ScheduleItem updated = new AutomationStore.ScheduleItem(
+                item.id(),
+                normalizeOptional(title, item.title()),
+                startAt,
+                endAt,
+                normalizeOptional(notes, item.notes()),
+                status != null ? status : effectiveScheduleStatus(item),
+                item.createdAt(),
+                clock.instant());
+        store.saveScheduleItem(updated);
+        return ScheduleResult.success(updated, "schedule item updated");
+    }
+
+    public ScheduleResult deleteScheduleItem(String id) {
+        Optional<AutomationStore.ScheduleItem> existing = store.findScheduleItem(id);
+        if (existing.isEmpty()) {
+            return ScheduleResult.failure("schedule item not found: " + id);
+        }
+        AutomationStore.ScheduleItem item = existing.get();
+        AutomationStore.ScheduleItem deleted = new AutomationStore.ScheduleItem(
+                item.id(),
+                item.title(),
+                item.startAt(),
+                item.endAt(),
+                item.notes(),
+                AutomationStore.ScheduleItemStatus.DELETED,
+                item.createdAt(),
+                clock.instant());
+        store.saveScheduleItem(deleted);
+        return ScheduleResult.success(deleted, "schedule item deleted");
+    }
+
+    public RecurringTaskResult createRecurringReminder(String title,
+                                                       AutomationStore.RecurringScheduleType scheduleType,
+                                                       String scheduleExpression,
+                                                       String message) {
+        String normalizedTitle = normalizeRequired(title, "title");
+        String normalizedExpression = normalizeRequired(scheduleExpression, "scheduleExpression");
+        if (normalizedTitle == null) {
+            return RecurringTaskResult.failure("title is required");
+        }
+        if (scheduleType == null) {
+            return RecurringTaskResult.failure("scheduleType is required");
+        }
+        if (normalizedExpression == null) {
+            return RecurringTaskResult.failure("scheduleExpression is required");
+        }
+        if (resolveRecipientId() == null) {
+            return RecurringTaskResult.failure("reminder recipient is not bound yet");
+        }
+
+        Instant now = clock.instant();
+        Instant nextRunAt;
+        try {
+            nextRunAt = computeNextRunAt(scheduleType, normalizedExpression, now);
+        } catch (DateTimeParseException | IllegalArgumentException e) {
+            return RecurringTaskResult.failure(e.getMessage());
+        }
+        AutomationStore.RecurringTask task = new AutomationStore.RecurringTask(
+                newRecurringTaskId(),
+                normalizedTitle,
+                scheduleType,
+                normalizedExpression,
+                normalizeOptional(message, normalizedTitle),
+                zoneId.getId(),
+                nextRunAt,
+                AutomationStore.RecurringTaskStatus.ACTIVE,
+                now,
+                now,
+                null);
+        store.saveRecurringTask(task);
+        scheduleRecurringInstance(task);
+        return RecurringTaskResult.success(task, "recurring reminder created");
+    }
+
+    public RecurringTaskResult deleteRecurringTask(String id) {
+        Optional<AutomationStore.RecurringTask> existing = store.findRecurringTask(id);
+        if (existing.isEmpty()) {
+            return RecurringTaskResult.failure("recurring task not found: " + id);
+        }
+        AutomationStore.RecurringTask task = existing.get();
+        AutomationStore.RecurringTask deleted = copyRecurringTask(
+                task,
+                task.nextRunAt(),
+                AutomationStore.RecurringTaskStatus.DELETED,
+                null);
+        store.saveRecurringTask(deleted);
+        for (AutomationStore.Reminder reminder : store.listReminders(AutomationStore.ReminderStatus.PENDING)) {
+            if (id.equals(reminder.recurringTaskId())) {
+                deleteReminder(reminder.id());
+            }
+        }
+        return RecurringTaskResult.success(deleted, "recurring task deleted");
+    }
+
+    public List<AutomationStore.RecurringTask> listRecurringTasks(AutomationStore.RecurringTaskStatus status) {
+        return store.listRecurringTasks(status);
     }
 
     void triggerReminder(String reminderId) {
@@ -184,6 +380,7 @@ public class AutomationRuntime implements InitializingBean {
             try {
                 dispatcher.send(recipientId, formatReminderMessage(triggering));
                 store.saveReminder(copyReminder(triggering, AutomationStore.ReminderStatus.SENT, null, i));
+                advanceRecurringTaskIfNeeded(triggering);
                 return;
             } catch (Exception e) {
                 lastError = e;
@@ -207,6 +404,21 @@ public class AutomationRuntime implements InitializingBean {
             } else {
                 store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.MISSED,
                         "missed while application was offline", reminder.sendAttempts()));
+            }
+        }
+    }
+
+    private void scheduleRecurringTasks() {
+        Instant now = clock.instant();
+        for (AutomationStore.RecurringTask task : store.listRecurringTasks(AutomationStore.RecurringTaskStatus.ACTIVE)) {
+            AutomationStore.RecurringTask normalized = task;
+            if (!task.nextRunAt().isAfter(now)) {
+                Instant nextRunAt = computeNextRunAt(task.scheduleType(), task.scheduleExpression(), now);
+                normalized = copyRecurringTask(task, nextRunAt, AutomationStore.RecurringTaskStatus.ACTIVE, null);
+                store.saveRecurringTask(normalized);
+            }
+            if (findPendingRecurringInstance(normalized.id(), normalized.nextRunAt()).isEmpty()) {
+                scheduleRecurringInstance(normalized);
             }
         }
     }
@@ -244,7 +456,8 @@ public class AutomationRuntime implements InitializingBean {
                 reminder.createdAt(),
                 clock.instant(),
                 failureMessage,
-                sendAttempts);
+                sendAttempts,
+                reminder.recurringTaskId());
     }
 
     private Instant parseInstant(String value) {
@@ -283,6 +496,123 @@ public class AutomationRuntime implements InitializingBean {
         return "S-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
     }
 
+    private static String newRecurringTaskId() {
+        return "RR-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+    }
+
+    private Instant computeNextRunAt(AutomationStore.RecurringScheduleType scheduleType,
+                                     String scheduleExpression,
+                                     Instant after) {
+        return switch (scheduleType) {
+            case DAILY -> nextDailyRun(scheduleExpression, after);
+            case WEEKLY -> nextWeeklyRun(scheduleExpression, after);
+            case CRON -> nextCronRun(scheduleExpression, after);
+        };
+    }
+
+    private Instant nextDailyRun(String expression, Instant after) {
+        LocalTime time = LocalTime.parse(expression.trim());
+        ZonedDateTime base = after.atZone(zoneId);
+        ZonedDateTime candidate = base.toLocalDate().atTime(time).atZone(zoneId);
+        if (!candidate.toInstant().isAfter(after)) {
+            candidate = candidate.plusDays(1);
+        }
+        return candidate.toInstant();
+    }
+
+    private Instant nextWeeklyRun(String expression, Instant after) {
+        String[] parts = expression.trim().split("\\s+");
+        if (parts.length != 2) {
+            throw new IllegalArgumentException("weekly scheduleExpression must be like FRIDAY 18:00");
+        }
+        DayOfWeek dayOfWeek = DayOfWeek.valueOf(parts[0].toUpperCase(Locale.ROOT));
+        LocalTime time = LocalTime.parse(parts[1]);
+        ZonedDateTime base = after.atZone(zoneId);
+        ZonedDateTime candidate = base.toLocalDate().atTime(time).atZone(zoneId);
+        int daysUntilTarget = dayOfWeek.getValue() - base.getDayOfWeek().getValue();
+        if (daysUntilTarget < 0) {
+            daysUntilTarget += 7;
+        }
+        candidate = candidate.plusDays(daysUntilTarget);
+        if (!candidate.toInstant().isAfter(after)) {
+            candidate = candidate.plusWeeks(1);
+        }
+        return candidate.toInstant();
+    }
+
+    private Instant nextCronRun(String expression, Instant after) {
+        CronExpression cronExpression = CronExpression.parse(expression.trim());
+        ZonedDateTime next = cronExpression.next(after.atZone(zoneId));
+        if (next == null) {
+            throw new IllegalArgumentException("cron scheduleExpression has no next run");
+        }
+        return next.toInstant();
+    }
+
+    private void scheduleRecurringInstance(AutomationStore.RecurringTask task) {
+        AutomationStore.Reminder reminder = new AutomationStore.Reminder(
+                newReminderId(),
+                task.title(),
+                task.nextRunAt(),
+                task.message(),
+                AutomationStore.ReminderStatus.PENDING,
+                clock.instant(),
+                clock.instant(),
+                null,
+                0,
+                task.id());
+        store.saveReminder(reminder);
+        scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+    }
+
+    private void advanceRecurringTaskIfNeeded(AutomationStore.Reminder reminder) {
+        if (reminder.recurringTaskId() == null || reminder.recurringTaskId().isBlank()) {
+            return;
+        }
+        Optional<AutomationStore.RecurringTask> existing = store.findRecurringTask(reminder.recurringTaskId());
+        if (existing.isEmpty() || existing.get().status() != AutomationStore.RecurringTaskStatus.ACTIVE) {
+            return;
+        }
+        AutomationStore.RecurringTask task = existing.get();
+        Instant nextRunAt = computeNextRunAt(task.scheduleType(), task.scheduleExpression(), task.nextRunAt());
+        AutomationStore.RecurringTask advanced = copyRecurringTask(
+                task,
+                nextRunAt,
+                AutomationStore.RecurringTaskStatus.ACTIVE,
+                null);
+        store.saveRecurringTask(advanced);
+        scheduleRecurringInstance(advanced);
+    }
+
+    private Optional<AutomationStore.Reminder> findPendingRecurringInstance(String recurringTaskId, Instant remindAt) {
+        return store.listReminders(AutomationStore.ReminderStatus.PENDING).stream()
+                .filter(reminder -> recurringTaskId.equals(reminder.recurringTaskId()))
+                .filter(reminder -> reminder.remindAt().equals(remindAt))
+                .findFirst();
+    }
+
+    private AutomationStore.RecurringTask copyRecurringTask(AutomationStore.RecurringTask task,
+                                                           Instant nextRunAt,
+                                                           AutomationStore.RecurringTaskStatus status,
+                                                           String failureMessage) {
+        return new AutomationStore.RecurringTask(
+                task.id(),
+                task.title(),
+                task.scheduleType(),
+                task.scheduleExpression(),
+                task.message(),
+                task.timeZone(),
+                nextRunAt,
+                status,
+                task.createdAt(),
+                clock.instant(),
+                failureMessage);
+    }
+
+    private static AutomationStore.ScheduleItemStatus effectiveScheduleStatus(AutomationStore.ScheduleItem item) {
+        return item.status() != null ? item.status() : AutomationStore.ScheduleItemStatus.ACTIVE;
+    }
+
     private String formatReminderMessage(AutomationStore.Reminder reminder) {
         return "Reminder: " + reminder.title() + "\n"
                 + "Time: " + DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(reminder.remindAt().atZone(zoneId)) + "\n"
@@ -316,6 +646,16 @@ public class AutomationRuntime implements InitializingBean {
 
         static ScheduleResult failure(String message) {
             return new ScheduleResult(false, null, message);
+        }
+    }
+
+    public record RecurringTaskResult(boolean success, AutomationStore.RecurringTask task, String message) {
+        static RecurringTaskResult success(AutomationStore.RecurringTask task, String message) {
+            return new RecurringTaskResult(true, task, message);
+        }
+
+        static RecurringTaskResult failure(String message) {
+            return new RecurringTaskResult(false, null, message);
         }
     }
 

@@ -192,7 +192,6 @@ public class ToolService {
             return tools.isEmpty();
         }
 
-        /** 汇总所有工具的能力类别，用于编排模型路由。去重后按字母排序。 */
         public String getCategorySummary() {
             return tools.stream()
                     .map(ProjectTool::category)
@@ -224,7 +223,9 @@ public class ToolService {
     public static class SystemTools implements ProjectTool {
 
         @Override
-        public String category() { return "information"; }
+        public String category() {
+            return "information";
+        }
 
         @Tool(name = "get_current_datetime", description = "Get the current date and time for the application timezone.")
         public String getCurrentDateTime() {
