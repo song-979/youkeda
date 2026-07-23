@@ -1,0 +1,8 @@
+Local file tool test
+
+中文测试内容：如果你能在微信里搜索到这个文件、读取这段文字，并让机器人把它发回给你，说明本地文件工具链路已经跑通。
+
+Suggested WeChat prompts:
+1. 帮我搜索 local-file-tool-test
+2. 读取 D:/github/wechat/wechatproject/local-file-tool-test.txt
+3. 把 D:/github/wechat/wechatproject/local-file-tool-test.txt 发给我

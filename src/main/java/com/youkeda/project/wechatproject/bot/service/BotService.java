@@ -115,7 +115,8 @@ public final class BotService {
         private final MessageBridge messageBridge;
         private final IlinkProperties props;
 
-        public IlinkClientLifecycle(ILinkClient ilinkClient, MessageBridge messageBridge, IlinkProperties props) {
+        public IlinkClientLifecycle(ILinkClient ilinkClient, MessageBridge messageBridge,
+                                    IlinkProperties props) {
             this.ilinkClient = ilinkClient;
             this.messageBridge = messageBridge;
             this.props = props;
@@ -125,10 +126,6 @@ public final class BotService {
         public void onReady() {
             if (!props.isAutoLogin()) {
                 log.info("iLink auto-login disabled (ilink.auto-login=false)");
-                return;
-            }
-            if (ilinkClient.isLoggedIn()) {
-                log.info("iLink already logged in (resumed from saved context)");
                 return;
             }
             log.info("starting iLink login...");

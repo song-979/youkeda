@@ -13,7 +13,7 @@ import org.springframework.web.util.UriComponentsBuilder;
 public class AmapPlaceIdTools implements ToolService.ProjectTool {
 
     @Override
-    public String category() { return "location"; }
+    public String category() { return "map_navigation"; }
 
     private static final Logger log = LoggerFactory.getLogger(AmapPlaceIdTools.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -35,7 +35,7 @@ public class AmapPlaceIdTools implements ToolService.ProjectTool {
     }
 
     @Tool(name = "query_amap_place_ids",
-          description = "Search Amap POIs by keyword or place name (e.g. city, address, landmark) and return place IDs, names, addresses, adcodes, and coordinates. Use this tool FIRST to convert place names into coordinates before calling other Amap tools (direction, around search, static map) that require longitude,latitude input.")
+          description = "高德地图POI地点搜索。根据关键词/地名/地址查找地点，返回名称、地址、坐标(location)、adcode等。当用户提到具体地名但需要坐标时，先用此工具查询。作为路线规划的第一步，先获取起点和终点的坐标。")
     public String queryPlaceIds(
             @ToolParam(description = "POI keyword, place name, company name, scenic spot, shop, or address to search.")
             String keywords,
@@ -76,7 +76,7 @@ public class AmapPlaceIdTools implements ToolService.ProjectTool {
             builder.queryParam("types", types);
         }
 
-        JsonNode root = parseJson(restTemplate.getForObject(AmapSignUtil.appendSign(builder, privateKey).build().encode().toUri(), String.class));
+        JsonNode root = parseJson(restTemplate.getForObject(AmapSignUtil.appendSign(builder, privateKey).build().toUri(), String.class));
         ensureAmapSuccess(root);
         return root;
     }

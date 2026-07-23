@@ -14,6 +14,7 @@ import com.youkeda.project.wechatproject.bot.service.OrchestrationService.Messag
 import com.youkeda.project.wechatproject.bot.service.OrchestrationService.ModelReply;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.AudioConverter;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.SpeechToTextClient;
+import com.youkeda.project.wechatproject.bot.tool.AutomationRuntime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
@@ -55,19 +56,22 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     private final SpeechToTextClient sttClient;
     private final AudioConverter audioConverter;
     private final DocumentService documentService;
+    private final AutomationRuntime automationRuntime;
 
     public MessageHandler(ILinkClient ilinkClient,
                           MessageBridge messageBridge,
                           MessageRouter router,
                           SpeechToTextClient sttClient,
                           AudioConverter audioConverter,
-                          DocumentService documentService) {
+                          DocumentService documentService,
+                          AutomationRuntime automationRuntime) {
         this.ilinkClient = ilinkClient;
         this.messageBridge = messageBridge;
         this.router = router;
         this.sttClient = sttClient;
         this.audioConverter = audioConverter;
         this.documentService = documentService;
+        this.automationRuntime = automationRuntime;
     }
 
     @Override
@@ -131,6 +135,14 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         } catch (Exception e) {
             log.error("unexpected error for user={}", fromUserId, e);
             sendErrorReply(fromUserId, null);
+        } finally {
+            if (automationRuntime != null) {
+                try {
+                    automationRuntime.retryOverduePendingReminders(fromUserId);
+                } catch (Exception ignored) {
+                    log.debug("failed to retry overdue pending reminders", ignored);
+                }
+            }
         }
     }
 

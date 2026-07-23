@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class AmapAroundSearchTools implements ToolService.ProjectTool {
 
     @Override
-    public String category() { return "location"; }
+    public String category() { return "map_navigation"; }
 
     private static final Logger log = LoggerFactory.getLogger(AmapAroundSearchTools.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -56,7 +56,7 @@ public class AmapAroundSearchTools implements ToolService.ProjectTool {
     }
 
     @Tool(name = "search_amap_places_around",
-          description = "Use this for Amap/Gaode nearby, around, radius, restaurant, hotel, parking, POI searches near a coordinate. This tool calls Amap place/around and automatically appends a static map URL using a zoom level adjusted from the search radius. Return the tool result directly unless it says the search failed.")
+          description = "【周边POI搜索——餐厅推荐、美食、咖啡店、酒店、停车场等都用这个】高德地图周边搜索。当用户询问任何地点周边的设施时使用：推荐附近餐厅、找咖啡店、搜酒店、哪里有停车场、周边美食等。需要中心点坐标(经度,纬度)，如果用户说的是地名，先调用query_amap_place_ids获取坐标。自动附带静态地图。")
     public String searchPlacesAround(
             @ToolParam(description = "Center coordinate in Amap longitude,latitude format, e.g. 120.143222,30.236064.")
             String location,
@@ -111,7 +111,7 @@ public class AmapAroundSearchTools implements ToolService.ProjectTool {
             builder.queryParam("types", types);
         }
 
-        JsonNode root = parseJson(restTemplate.getForObject(AmapSignUtil.appendSign(builder, privateKey).build().encode().toUri(), String.class));
+        JsonNode root = parseJson(restTemplate.getForObject(AmapSignUtil.appendSign(builder, privateKey).build().toUri(), String.class));
         ensureAmapSuccess(root);
         return root;
     }

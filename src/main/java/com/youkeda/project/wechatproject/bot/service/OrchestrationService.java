@@ -13,6 +13,7 @@ import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceCatalog;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceProfile;
 import com.youkeda.project.wechatproject.bot.tool.AmapAroundSearchTools;
 import com.youkeda.project.wechatproject.bot.tool.AmapDirectionTools;
+import com.youkeda.project.wechatproject.bot.tool.LocalFileTools;
 import com.youkeda.project.wechatproject.bot.tool.MotouTool;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -432,14 +433,36 @@ public final class OrchestrationService {
 
         @Override
         public AgentCapability getCapability() {
+            boolean hasMapTools = toolCategories.contains("map_navigation");
+            boolean hasSearchTools = toolCategories.contains("information");
             String desc = "Handles dialogue, writing, analysis, vision-language responses, and tool-assisted runtime tasks.";
             if (!toolCategories.isEmpty()) {
                 desc += " Internal tool categories: " + toolCategories + ".";
             }
+            if (hasMapTools) {
+                desc += " Can search places, find nearby POIs, plan driving/walking/transit/bicycling routes, geocode addresses, and generate static maps via Amap (高德地图) tools.";
+            }
+            if (hasSearchTools) {
+                desc += " Can search the internet for real-time news, facts, and web content.";
+            }
+            boolean hasAutomationTools = toolCategories.contains("automation");
+            if (hasAutomationTools) {
+                desc += " Can create/manage reminders, timers, alarms, recurring reminders, and schedule items.";
+            }
+            List<String> strengths = new ArrayList<>(List.of("dialogue", "writing", "analysis", "vision", "runtime-tools"));
+            if (hasMapTools) {
+                strengths.addAll(List.of("place-search", "nearby-search", "route-planning", "map-navigation", "geocoding"));
+            }
+            if (hasSearchTools) {
+                strengths.add("web-search");
+            }
+            if (hasAutomationTools) {
+                strengths.addAll(List.of("reminder", "timer", "alarm", "schedule", "recurring-reminder"));
+            }
             return new AgentCapability(
                     "chat-generation",
                     desc,
-                    List.of("dialogue", "writing", "analysis", "vision", "runtime-tools"),
+                    strengths,
                     "text"
             );
         }
@@ -458,6 +481,11 @@ public final class OrchestrationService {
             String motouGifPath = MotouTool.getAndClearLastGifPath();
             if (motouGifPath != null && (response == null || !response.contains("[MOTOU_GIF:"))) {
                 response = "[MOTOU_GIF:" + motouGifPath + "]\n" + (response != null ? response : "");
+            }
+
+            LocalFileTools.PreparedFile localFile = LocalFileTools.peekPreparedFile();
+            if (localFile != null && (response == null || !response.contains("[LOCAL_FILE:"))) {
+                response = "[LOCAL_FILE:" + localFile.absolutePath() + "]\n" + (response != null ? response : "");
             }
 
             log.info("ChatAgent response: {} chars", response != null ? response.length() : 0);
@@ -903,6 +931,18 @@ public final class OrchestrationService {
                   * IMAGE_GEN: generating new static images (NOT GIFs)
                   * SPEECH_GEN: converting text to audio/speech
 
+                Location / POI / Map / Navigation routing rules (CRITICAL):
+                - When the user asks about locations, places, POI, nearby search, directions, routes, navigation, maps, geocoding, or coordinates, you MUST route to CHAT. CHAT has internal Amap (高德地图) tools that handle all these queries.
+                - Explicit examples that MUST go to CHAT: "附近咖啡店", "XX在哪里", "搜索XX地点", "去XX怎么走", "从A到B的路线", "周边有什么餐厅", "查一下XX的地址", "导航到XX", "XX的坐标", any location/place name query.
+                - Do NOT return completed for these queries — CHAT must handle them via its tool loop.
+                - Do NOT suggest the user search manually or use a web browser — CHAT's internal tools will provide the answer directly.
+
+                Reminder / Schedule / Timer routing rules (CRITICAL):
+                - When the user asks to set a reminder, timer, alarm, schedule, or calendar event, you MUST route to CHAT. CHAT has internal automation tools (create_reminder, create_schedule_item, create_recurring_reminder, etc.) that handle all reminder and scheduling operations.
+                - Explicit examples that MUST go to CHAT: "提醒我XX", "设置闹钟", "定时XX", "X分钟后叫我", "创建日程", "明天X点提醒", "每天X点提醒", "帮我记一下XX", "几点叫我", any reminder/timer/alarm/schedule request.
+                - The system DOES support reminders — do NOT say it doesn't. Route to CHAT and let CHAT handle it.
+                - Do NOT return completed for these queries — CHAT must handle them via its internal tool loop.
+
                 File generation rules (via CHAT):
                 - When the user asks to generate, export, save, download, or create a file (e.g. Markdown doc, report, summary, data export, weekly report, code file, etc.), route to CHAT.
                 - CRITICAL: When creating a CHAT task for file generation, your instruction MUST explicitly include the output format requirement. Tell CHAT to wrap the file content in markers:
@@ -1280,6 +1320,8 @@ public final class OrchestrationService {
                 "\\[FILE:(.+?)]\\r?\\n(.*?)\\r?\\n\\[/FILE]", Pattern.DOTALL);
         private static final Pattern MOTOU_GIF_MARKER = Pattern.compile(
                 "\\[MOTOU_GIF:(.+?)]");
+        private static final Pattern LOCAL_FILE_MARKER = Pattern.compile(
+                "\\[LOCAL_FILE:(.+?)]");
 
         private final ConcurrentHashMap<String, ReentrantLock> userLocks = new ConcurrentHashMap<>();
         private final OrchestratorAgent orchestrator;
@@ -1401,6 +1443,15 @@ public final class OrchestrationService {
 
         private OrchestrationResult specialCasePlan(UserRequest request) {
             String text = request.text() == null ? "" : request.text().trim();
+
+            // 用户只发了图片没有附带文字，追问用户具体需求
+            if (!request.imageBase64Urls().isEmpty() && text.isEmpty()) {
+                return OrchestrationResult.builder()
+                        .status(OrchestrationResult.Status.NEEDS_CLARIFICATION)
+                        .reasoning("user sent images without text, need to ask for requirements")
+                        .clarificationQuestion("你发送了图片，请问需要我做些什么呢？")
+                        .build();
+            }
 
             if (registry.contains("SPEECH_GEN") && isComfortStoryRequest(text)) {
                 String gentleVoice = voiceCatalog.findByMood("comforting")
@@ -1600,7 +1651,17 @@ public final class OrchestrationService {
             }
 
             ModelReply.FilePayload filePayload = null;
-            if (textReply != null) {
+            LocalFileTools.PreparedFile preparedLocalFile = LocalFileTools.getAndClearPreparedFile();
+            if (preparedLocalFile != null) {
+                filePayload = new ModelReply.FilePayload(preparedLocalFile.bytes(), preparedLocalFile.fileName());
+                if (textReply != null) {
+                    textReply = LOCAL_FILE_MARKER.matcher(textReply).replaceAll("").trim();
+                }
+                log.info("loaded local file payload from path={}, size={} bytes",
+                        preparedLocalFile.absolutePath(), preparedLocalFile.bytes().length);
+            }
+
+            if (filePayload == null && textReply != null) {
                 ParsedFileResult parsed = extractFileMarkers(textReply);
                 if (parsed != null) {
                     textReply = parsed.remainderText();

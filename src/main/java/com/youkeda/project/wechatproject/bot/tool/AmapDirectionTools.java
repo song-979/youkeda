@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class AmapDirectionTools implements ToolService.ProjectTool {
 
     @Override
-    public String category() { return "location"; }
+    public String category() { return "map_navigation"; }
 
     private static final Logger log = LoggerFactory.getLogger(AmapDirectionTools.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -57,7 +57,7 @@ public class AmapDirectionTools implements ToolService.ProjectTool {
     }
 
     @Tool(name = "search_amap_direction_walking",
-          description = "Search Amap walking route directions between two coordinates. Use this for walking navigation, pedestrian routes, foot paths. Automatically generates a route map image.")
+          description = "高德地图步行路线规划。当用户询问步行导航/步行路线/走路怎么走时使用此工具。需要起点和终点坐标(经度,纬度)，如果用户说的是地名，先调用query_amap_place_ids获取坐标。自动生成路线地图。")
     public String searchWalking(
             @ToolParam(description = "Starting point coordinate in Amap longitude,latitude format, e.g. 120.143222,30.236064.")
             String origin,
@@ -67,7 +67,7 @@ public class AmapDirectionTools implements ToolService.ProjectTool {
     }
 
     @Tool(name = "search_amap_direction_transit",
-          description = "Search Amap public transit (bus/metro) route directions between two coordinates. Use this for bus, subway, metro, public transportation routes. Requires city parameter. Automatically generates a route map image.")
+          description = "高德地图公交/地铁路线规划。当用户询问公交/地铁/公共交通怎么坐时使用此工具。需要起点终点坐标和城市名，如果用户说的是地名，先调用query_amap_place_ids获取坐标。自动生成路线地图。")
     public String searchTransit(
             @ToolParam(description = "Starting point coordinate in Amap longitude,latitude format, e.g. 120.143222,30.236064.")
             String origin,
@@ -82,7 +82,7 @@ public class AmapDirectionTools implements ToolService.ProjectTool {
     }
 
     @Tool(name = "search_amap_direction_driving",
-          description = "Search Amap driving route directions between two coordinates. Use this for car navigation, driving routes, vehicle routes. Automatically generates a route map image.")
+          description = "高德地图驾车路线规划。当用户询问开车/驾车/自驾/导航路线时优先使用此工具。需要起点和终点坐标(经度,纬度)，如果用户说的是地名，先调用query_amap_place_ids获取坐标。自动生成路线地图。")
     public String searchDriving(
             @ToolParam(description = "Starting point coordinate in Amap longitude,latitude format, e.g. 120.143222,30.236064.")
             String origin,
@@ -95,7 +95,7 @@ public class AmapDirectionTools implements ToolService.ProjectTool {
     }
 
     @Tool(name = "search_amap_direction_bicycling",
-          description = "Search Amap bicycling route directions between two coordinates. Use this for cycling, biking navigation, bicycle routes. Automatically generates a route map image.")
+          description = "高德地图骑行路线规划。当用户询问骑行/骑车/自行车路线时使用此工具。需要起点和终点坐标(经度,纬度)，如果用户说的是地名，先调用query_amap_place_ids获取坐标。自动生成路线地图。")
     public String searchBicycling(
             @ToolParam(description = "Starting point coordinate in Amap longitude,latitude format, e.g. 120.143222,30.236064.")
             String origin,
@@ -146,7 +146,7 @@ public class AmapDirectionTools implements ToolService.ProjectTool {
         }
 
         JsonNode root = parseJson(restTemplate.getForObject(
-                AmapSignUtil.appendSign(builder, privateKey).build().encode().toUri(), String.class));
+                AmapSignUtil.appendSign(builder, privateKey).build().toUri(), String.class));
         ensureAmapSuccess(root);
         return root;
     }

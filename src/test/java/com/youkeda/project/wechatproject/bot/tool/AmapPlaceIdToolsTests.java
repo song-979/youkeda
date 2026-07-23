@@ -16,7 +16,7 @@ class AmapPlaceIdToolsTests {
     void queriesPlaceIdsWithFixedAmapKey() {
         RestTemplate restTemplate = new RestTemplate();
         MockRestServiceServer server = MockRestServiceServer.bindTo(restTemplate).build();
-        server.expect(requestTo("https://restapi.amap.com/v3/place/text?key=d7db5a1d05aed595cac96d966a7a3471&keywords=%E8%A5%BF%E6%B9%96&offset=3&page=1&extensions=base&output=JSON&city=%E6%9D%AD%E5%B7%9E&citylimit=true&types=110000"))
+        server.expect(requestTo("https://restapi.amap.com/v3/place/text?key=d7db5a1d05aed595cac96d966a7a3471&keywords=西湖&offset=3&page=1&extensions=base&output=JSON&city=杭州&citylimit=true&types=110000"))
                 .andExpect(queryParam("key", "d7db5a1d05aed595cac96d966a7a3471"))
                 .andExpect(queryParam("keywords", "%E8%A5%BF%E6%B9%96"))
                 .andExpect(queryParam("city", "%E6%9D%AD%E5%B7%9E"))

@@ -9,6 +9,9 @@ import java.util.List;
 
 public class AutomationTools implements ToolService.ProjectTool {
 
+    @Override
+    public String category() { return "automation"; }
+
     private final AutomationRuntime runtime;
     private final AutomationProperties properties;
     private final ZoneId zoneId;

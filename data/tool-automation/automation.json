@@ -66,6 +66,17 @@
     "sendAttempts" : 1,
     "recurringTaskId" : null
   }, {
+    "id" : "R-20238DDE",
+    "title" : "吃饭提醒",
+    "remindAt" : 1784779200.000000000,
+    "message" : "该吃饭啦！",
+    "status" : "FAILED",
+    "createdAt" : 1784778377.034471200,
+    "updatedAt" : 1784779200.014135000,
+    "failureMessage" : "missing latest context token for userId=o9cq805WvMDTjlS0Ksv0gpzc7ln8@im.wechat",
+    "sendAttempts" : 3,
+    "recurringTaskId" : null
+  }, {
     "id" : "R-0747179D",
     "title" : "喝水提醒",
     "remindAt" : 1784781000.000000000,
@@ -121,6 +132,28 @@
     "sendAttempts" : 1,
     "recurringTaskId" : null
   }, {
+    "id" : "R-BEB5CD03",
+    "title" : "吃饭提醒",
+    "remindAt" : 1784782500.000000000,
+    "message" : "该吃午饭了！",
+    "status" : "MISSED",
+    "createdAt" : 1784782420.970160300,
+    "updatedAt" : 1784782687.190335300,
+    "failureMessage" : "missed while application was offline",
+    "sendAttempts" : 0,
+    "recurringTaskId" : null
+  }, {
+    "id" : "R-B15FF62A",
+    "title" : "吃饭提醒",
+    "remindAt" : 1784782800.000000000,
+    "message" : "记得吃饭哦！该吃午饭了。",
+    "status" : "MISSED",
+    "createdAt" : 1784782398.280476100,
+    "updatedAt" : 1784782993.261912100,
+    "failureMessage" : "missed while application was offline",
+    "sendAttempts" : 0,
+    "recurringTaskId" : null
+  }, {
     "id" : "R-2C9081D4",
     "title" : "工作提醒",
     "remindAt" : 1784782800.000000000,
@@ -130,6 +163,17 @@
     "updatedAt" : 1784782800.253894900,
     "failureMessage" : null,
     "sendAttempts" : 1,
+    "recurringTaskId" : null
+  }, {
+    "id" : "R-CC0FB363",
+    "title" : "吃饭",
+    "remindAt" : 1784788500.000000000,
+    "message" : "吃饭",
+    "status" : "PENDING",
+    "createdAt" : 1784788386.875488000,
+    "updatedAt" : 1784788504.018784300,
+    "failureMessage" : "waiting for context refresh: missing latest context token for userId=o9cq805WvMDTjlS0Ksv0gpzc7ln8@im.wechat",
+    "sendAttempts" : 0,
     "recurringTaskId" : null
   } ],
   "scheduleItems" : [ {
