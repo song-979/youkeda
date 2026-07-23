@@ -385,7 +385,11 @@ public class AutomationRuntime implements InitializingBean {
             } catch (Exception e) {
                 lastError = e;
                 log.warn("reminder dispatch failed: id={}, attempt={}/{}", reminderId, i, attempts, e);
-                if (isRetryableError(e) && i < attempts) {
+                // context token 过期，等几秒重试没有意义，token 只能在用户发消息时刷新
+                if (isContextTokenError(e)) {
+                    break;
+                }
+                if (i < attempts) {
                     try {
                         Thread.sleep(2000);
                     } catch (InterruptedException ignored) {
@@ -396,13 +400,14 @@ public class AutomationRuntime implements InitializingBean {
             }
         }
 
-        if (isRetryableError(lastError)) {
+        if (isContextTokenError(lastError)) {
+            // token 问题不属于系统故障，保持 PENDING 等用户下次发消息时自然重试
             store.saveReminder(copyReminder(
                     triggering,
                     AutomationStore.ReminderStatus.PENDING,
-                    "waiting for context refresh: " + (lastError != null ? lastError.getMessage() : "send failed"),
+                    "waiting for context refresh: " + lastError.getMessage(),
                     0));
-            log.info("reminder {} kept PENDING due to retryable error, will retry on next incoming message", reminderId);
+            log.info("reminder {} kept PENDING, will retry on next user message", reminderId);
         } else {
             store.saveReminder(copyReminder(
                     triggering,
@@ -412,20 +417,12 @@ public class AutomationRuntime implements InitializingBean {
         }
     }
 
-    private static boolean isRetryableError(Exception e) {
+    private static boolean isContextTokenError(Exception e) {
         if (e == null) {
             return false;
         }
         String msg = e.getMessage();
         return msg != null && (msg.contains("context token") || msg.contains("contextToken"));
-    }
-
-    public void retryOverduePendingReminders() {
-        String recipientId = resolveRecipientId();
-        if (recipientId == null) {
-            return;
-        }
-        retryOverduePendingReminders(recipientId);
     }
 
     public void retryOverduePendingReminders(String triggeredByUserId) {

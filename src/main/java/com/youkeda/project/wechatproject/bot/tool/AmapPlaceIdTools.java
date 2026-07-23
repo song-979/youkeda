@@ -50,8 +50,11 @@ public class AmapPlaceIdTools implements ToolService.ProjectTool {
         }
 
         try {
+            log.info("amap place search: keywords={}, city={}", keywords, city);
             JsonNode root = requestPlaceText(keywords.trim(), trimToNull(city), trimToNull(types), normalizeLimit(limit));
-            return formatPlaces(root);
+            String result = formatPlaces(root);
+            log.info("amap place search result: {} chars", result.length());
+            return result;
         } catch (Exception e) {
             log.warn("amap place id tool failed: keywords={}, city={}, types={}, error={}",
                     keywords, city, types, e.getMessage());
