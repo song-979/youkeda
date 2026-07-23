@@ -741,6 +741,19 @@ public final class OrchestrationService {
             return null;
         }
 
+        public String lastSuccessfulTextOutput() {
+            for (int i = records.size() - 1; i >= 0; i--) {
+                ExecutionRecord r = records.get(i);
+                if (("CHAT".equals(r.task().agentType()) || "MEITUAN_PAOTUI".equals(r.task().agentType()))
+                        && r.result().status() == AgentResult.Status.SUCCESS
+                        && r.result().rawOutput() != null
+                        && !r.result().rawOutput().isEmpty()) {
+                    return r.result().rawOutput();
+                }
+            }
+            return null;
+        }
+
         public List<String> allSuccessfulChatTexts() {
             List<String> texts = new ArrayList<>();
             for (ExecutionRecord r : records) {
@@ -1303,6 +1316,10 @@ public final class OrchestrationService {
                     }
                 }
 
+                if (hasExecutedAgent(result, "MEITUAN_PAOTUI") || isSingleTurnToolFlow(result, "meituan-paotui")) {
+                    break;
+                }
+
                 if (!reflectionEnabled) {
                     break;
                 }
@@ -1332,6 +1349,41 @@ public final class OrchestrationService {
 
         private OrchestrationResult specialCasePlan(UserRequest request) {
             String text = request.text() == null ? "" : request.text().trim();
+
+            if (isMeituanPaotuiRequest(text) || isMeituanPaotuiFollowUp(request)) {
+                if (registry.contains("MEITUAN_PAOTUI")) {
+                    return OrchestrationResult.builder()
+                            .status(OrchestrationResult.Status.EXECUTE)
+                            .reasoning("meituan paotui deterministic flow")
+                            .tasks(List.of(new AgentTask(
+                                    "MEITUAN_PAOTUI",
+                                    text,
+                                    Map.of("flow", "meituan-paotui"))))
+                            .build();
+                }
+                return OrchestrationResult.builder()
+                        .status(OrchestrationResult.Status.EXECUTE)
+                        .reasoning("meituan paotui tool-assisted flow")
+                        .tasks(List.of(new AgentTask(
+                                "CHAT",
+                                """
+                                用户正在请求美团跑腿/帮买/帮送/同城配送能力。请使用内部美团跑腿工具完成流程，不要只生成下单指引。
+
+                                必须遵守：
+                                1. 第一步必须实际调用 check_meituan_paotui_login 工具检查登录状态，不能凭空判断。
+                                2. 地址不完整时，先查地址簿或 POI，并向用户补齐必要地址和联系电话。
+                                3. 物品信息不完整时再询问用户。
+                                4. 提交真实订单前必须先展示费用预览。
+                                5. 只有用户明确回复“确认”或“确认下单”后，才能调用提交订单工具。
+                                6. 如果工具返回接口异常或鉴权失败，只向用户说明需要重新授权/稍后重试，不展示技术细节。
+                                7. 美团跑腿 zip 包和 Node 路径已经在系统配置中提供；不要要求用户上传 zip 包，也不要说缺少运行包，除非工具明确返回找不到脚本或 zip。
+                                8. 如果登录检查通过，但用户只说了“帮买瑞幸咖啡”这类不完整需求，请继续询问收货地址、联系电话、购买物品规格等必要信息。
+
+                                用户原始请求：%s
+                                """.formatted(text),
+                                Map.of("flow", "meituan-paotui"))))
+                        .build();
+            }
 
             if (registry.contains("SPEECH_GEN") && isComfortStoryRequest(text)) {
                 String gentleVoice = voiceCatalog.findByMood("comforting")
@@ -1423,6 +1475,13 @@ public final class OrchestrationService {
                 }
             }
 
+            if ("MEITUAN_PAOTUI".equals(task.agentType()) && !request.history().isEmpty()) {
+                params.put("history", request.history());
+            }
+            if ("MEITUAN_PAOTUI".equals(task.agentType())) {
+                params.put("userId", request.userId());
+            }
+
             if ("SPEECH_GEN".equals(task.agentType())) {
                 params.put("text", resolveSpeechText(task, scratchpad));
             }
@@ -1477,6 +1536,11 @@ public final class OrchestrationService {
                 return String.join("\n\n---\n\n", allChatTexts);
             }
 
+            String toolText = result.scratchpad().lastSuccessfulTextOutput();
+            if (toolText != null && !toolText.isBlank()) {
+                return toolText;
+            }
+
             if (finalReply != null && finalReply.getTextContent() != null && !finalReply.getTextContent().isBlank()) {
                 return finalReply.getTextContent();
             }
@@ -1525,7 +1589,7 @@ public final class OrchestrationService {
 
         private ModelReply buildFinalReply(OrchestrationResult result) {
             TaskScratchpad scratchpad = result.scratchpad();
-            String textReply = scratchpad.lastSuccessfulChatText();
+            String textReply = scratchpad.lastSuccessfulTextOutput();
             if (textReply == null || textReply.isBlank()) {
                 textReply = result.finalReply() != null ? result.finalReply().getTextContent() : null;
             }
@@ -1692,6 +1756,85 @@ public final class OrchestrationService {
                     "\u8bf4\u660e",
                     "\u770b\u770b");
             return wantImage && wantDescribe;
+        }
+
+        private static boolean isMeituanPaotuiRequest(String text) {
+            if (text == null || text.isBlank()) {
+                return false;
+            }
+            return containsAny(text,
+                    "美团跑腿",
+                    "跑腿",
+                    "下跑腿单",
+                    "跑腿下单",
+                    "同城配送",
+                    "帮取",
+                    "帮送",
+                    "帮我送",
+                    "送东西",
+                    "寄文件",
+                    "送合同",
+                    "取快递",
+                    "帮买",
+                    "帮我买",
+                    "叫骑手",
+                    "骑手帮忙",
+                    "取号",
+                    "排队",
+                    "帮搬",
+                    "帮扔",
+                    "扔垃圾");
+        }
+
+        private static boolean isMeituanPaotuiFollowUp(UserRequest request) {
+            if (request == null || request.text() == null || request.text().isBlank()) {
+                return false;
+            }
+            String text = request.text();
+            boolean relevantMessage = containsAny(text,
+                    "授权", "已授权", "开始授权", "重新授权",
+                    "地址", "门店", "就近", "电话", "手机号",
+                    "确认", "确认地址", "确认预览", "确认下单");
+            if (!relevantMessage) {
+                return false;
+            }
+            int start = Math.max(0, request.history().size() - 6);
+            for (int i = start; i < request.history().size(); i++) {
+                ChatRequest.Message message = request.history().get(i);
+                String content = message != null && message.getContent() != null
+                        ? message.getContent().toString()
+                        : null;
+                if (isMeituanPaotuiRequest(content)
+                        || (content != null && content.contains("美团跑腿"))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static boolean isSingleTurnToolFlow(OrchestrationResult result, String flow) {
+            if (result == null || flow == null || flow.isBlank()) {
+                return false;
+            }
+            for (AgentTask task : result.tasks()) {
+                Object taskFlow = task.parameters().get("flow");
+                if (flow.equals(taskFlow)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static boolean hasExecutedAgent(OrchestrationResult result, String agentType) {
+            if (result == null || agentType == null || agentType.isBlank()) {
+                return false;
+            }
+            for (TaskScratchpad.ExecutionRecord record : result.scratchpad().records()) {
+                if (agentType.equals(record.task().agentType())) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private static boolean referencesImage(String text) {
