@@ -16,6 +16,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class AmapDirectionTools implements ToolService.ProjectTool {
 
+    @Override
+    public String category() { return "location"; }
+
     private static final Logger log = LoggerFactory.getLogger(AmapDirectionTools.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final String AMAP_KEY = "d7db5a1d05aed595cac96d966a7a3471";

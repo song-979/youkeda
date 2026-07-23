@@ -8,7 +8,7 @@ class AmapStaticMapToolsTests {
 
     @Test
     void generatesStaticMapUrlWithFixedAmapKeyAndDefaults() {
-        String result = new AmapStaticMapTools()
+        String result = new AmapStaticMapTools("")
                 .generateStaticMap("120.143222,30.236064", null, null, null, null, null, null, false);
 
         assertThat(result)
@@ -25,7 +25,7 @@ class AmapStaticMapToolsTests {
 
     @Test
     void generatesStaticMapUrlWithOptionalOverlays() {
-        String result = new AmapStaticMapTools().generateStaticMap(
+        String result = new AmapStaticMapTools("").generateStaticMap(
                 "120.143222,30.236064",
                 16,
                 "800*600",

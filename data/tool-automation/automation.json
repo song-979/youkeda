@@ -8,7 +8,8 @@
     "createdAt" : 1784705902.903160200,
     "updatedAt" : 1784706079.307778300,
     "failureMessage" : null,
-    "sendAttempts" : 1
+    "sendAttempts" : 1,
+    "recurringTaskId" : null
   }, {
     "id" : "R-31168108",
     "title" : "吃药提醒",
@@ -18,7 +19,8 @@
     "createdAt" : 1784707945.313811900,
     "updatedAt" : 1784708000.293454700,
     "failureMessage" : null,
-    "sendAttempts" : 1
+    "sendAttempts" : 1,
+    "recurringTaskId" : null
   }, {
     "id" : "R-62F5C7F1",
     "title" : "健身提醒",
@@ -28,7 +30,8 @@
     "createdAt" : 1784708502.125348500,
     "updatedAt" : 1784708529.767946200,
     "failureMessage" : null,
-    "sendAttempts" : 1
+    "sendAttempts" : 1,
+    "recurringTaskId" : null
   }, {
     "id" : "R-C823B80A",
     "title" : "开会",
@@ -38,7 +41,8 @@
     "createdAt" : 1784710237.814527500,
     "updatedAt" : 1784710245.541888400,
     "failureMessage" : null,
-    "sendAttempts" : 1
+    "sendAttempts" : 1,
+    "recurringTaskId" : null
   }, {
     "id" : "R-61720AF9",
     "title" : "冷笑话时间",
@@ -48,7 +52,8 @@
     "createdAt" : 1784710280.610585900,
     "updatedAt" : 1784710305.589094900,
     "failureMessage" : null,
-    "sendAttempts" : 1
+    "sendAttempts" : 1,
+    "recurringTaskId" : null
   }, {
     "id" : "R-FEB9277D",
     "title" : "冷笑话时间（5分钟后）",
@@ -58,7 +63,74 @@
     "createdAt" : 1784711050.260612700,
     "updatedAt" : 1784711345.854192000,
     "failureMessage" : null,
-    "sendAttempts" : 1
+    "sendAttempts" : 1,
+    "recurringTaskId" : null
+  }, {
+    "id" : "R-0747179D",
+    "title" : "喝水提醒",
+    "remindAt" : 1784781000.000000000,
+    "message" : "请记得喝水！",
+    "status" : "SENT",
+    "createdAt" : 1784780981.107254500,
+    "updatedAt" : 1784781000.231002900,
+    "failureMessage" : null,
+    "sendAttempts" : 1,
+    "recurringTaskId" : "RR-C5E548C1"
+  }, {
+    "id" : "R-5302E9E7",
+    "title" : "喝水提醒",
+    "remindAt" : 1784781300.000000000,
+    "message" : "请记得喝水！",
+    "status" : "SENT",
+    "createdAt" : 1784781000.235904900,
+    "updatedAt" : 1784781300.393477300,
+    "failureMessage" : null,
+    "sendAttempts" : 1,
+    "recurringTaskId" : "RR-C5E548C1"
+  }, {
+    "id" : "R-02E59E42",
+    "title" : "喝水提醒",
+    "remindAt" : 1784781600.000000000,
+    "message" : "请记得喝水！",
+    "status" : "SENT",
+    "createdAt" : 1784781300.396426200,
+    "updatedAt" : 1784781600.321152600,
+    "failureMessage" : null,
+    "sendAttempts" : 1,
+    "recurringTaskId" : "RR-C5E548C1"
+  }, {
+    "id" : "R-EBC0CD60",
+    "title" : "喝水提醒",
+    "remindAt" : 1784781900.000000000,
+    "message" : "请记得喝水！",
+    "status" : "DELETED",
+    "createdAt" : 1784781600.324151300,
+    "updatedAt" : 1784781862.075064200,
+    "failureMessage" : null,
+    "sendAttempts" : 0,
+    "recurringTaskId" : "RR-C5E548C1"
+  }, {
+    "id" : "R-EA3198F6",
+    "title" : "睡觉提醒",
+    "remindAt" : 1784782200.000000000,
+    "message" : "该睡觉了",
+    "status" : "SENT",
+    "createdAt" : 1784781951.642713200,
+    "updatedAt" : 1784782200.334759000,
+    "failureMessage" : null,
+    "sendAttempts" : 1,
+    "recurringTaskId" : null
+  }, {
+    "id" : "R-2C9081D4",
+    "title" : "工作提醒",
+    "remindAt" : 1784782800.000000000,
+    "message" : "该工作了",
+    "status" : "SENT",
+    "createdAt" : 1784782264.107661600,
+    "updatedAt" : 1784782800.253894900,
+    "failureMessage" : null,
+    "sendAttempts" : 1,
+    "recurringTaskId" : null
   } ],
   "scheduleItems" : [ {
     "id" : "S-4A962503",
@@ -66,6 +138,7 @@
     "startAt" : 1784768400.000000000,
     "endAt" : 1784772000.000000000,
     "notes" : "",
+    "status" : "ACTIVE",
     "createdAt" : 1784714127.271773100,
     "updatedAt" : 1784714127.271773100
   }, {
@@ -74,8 +147,22 @@
     "startAt" : 1784786400.000000000,
     "endAt" : 1784790000.000000000,
     "notes" : "",
+    "status" : "ACTIVE",
     "createdAt" : 1784714127.280397400,
     "updatedAt" : 1784714127.280397400
+  } ],
+  "recurringTasks" : [ {
+    "id" : "RR-C5E548C1",
+    "title" : "喝水提醒",
+    "scheduleType" : "CRON",
+    "scheduleExpression" : "0 */5 * * * *",
+    "message" : "请记得喝水！",
+    "timeZone" : "Asia/Shanghai",
+    "nextRunAt" : 1784781900.000000000,
+    "status" : "DELETED",
+    "createdAt" : 1784780981.096499200,
+    "updatedAt" : 1784781862.073058600,
+    "failureMessage" : null
   } ],
   "recipientBinding" : {
     "recipientId" : "o9cq805WvMDTjlS0Ksv0gpzc7ln8@im.wechat",
