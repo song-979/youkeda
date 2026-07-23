@@ -6,6 +6,9 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 public class AmapStaticMapTools implements ToolService.ProjectTool {
 
+    @Override
+    public String category() { return "location"; }
+
     private static final String STATIC_MAP_URL = "https://restapi.amap.com/v3/staticmap";
     private static final String AMAP_KEY = "d7db5a1d05aed595cac96d966a7a3471";
     private static final int DEFAULT_ZOOM = 14;

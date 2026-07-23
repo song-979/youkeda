@@ -8,6 +8,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -128,10 +129,37 @@ public class ToolService {
         return new WeatherTools(weatherProperties);
     }
 
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.placeid", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public AmapPlaceIdTools amapPlaceIdTools(@Value("${agent.tools.weather.amap-private-key:}") String amapPrivateKey) {
+        return new AmapPlaceIdTools(amapPrivateKey);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.aroundsearch", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public AmapAroundSearchTools amapAroundSearchTools(@Value("${agent.tools.weather.amap-private-key:}") String amapPrivateKey) {
+        return new AmapAroundSearchTools(amapPrivateKey);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.direction", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public AmapDirectionTools amapDirectionTools(@Value("${agent.tools.weather.amap-private-key:}") String amapPrivateKey) {
+        return new AmapDirectionTools(amapPrivateKey);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.staticmap", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public AmapStaticMapTools amapStaticMapTools(@Value("${agent.tools.weather.amap-private-key:}") String amapPrivateKey) {
+        return new AmapStaticMapTools(amapPrivateKey);
+    }
+
     public interface ProjectTool {
-        default String category() {
-            return "";
-        }
+        /** 工具能力类别，用于编排模型路由决策。例如 "information", "web_content", "media_generation" */
+        default String category() { return ""; }
     }
 
     public static class ToolRuntime {
@@ -139,9 +167,10 @@ public class ToolService {
         private static final Logger log = LoggerFactory.getLogger(ToolRuntime.class);
 
         private static final Map<String, String> CATEGORY_LABELS = Map.of(
-                "information", "information query",
-                "web_content", "web content retrieval",
-                "media_generation", "media generation"
+                "information", "信息查询（时间、天气、搜索）",
+                "web_content", "网页内容获取",
+                "media_generation", "媒体生成（GIF 表情）",
+                "location", "位置与地图（地点查询、周边搜索、路线规划、静态地图）"
         );
 
         private final List<ProjectTool> tools;
