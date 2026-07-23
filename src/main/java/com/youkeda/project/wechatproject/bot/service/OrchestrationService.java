@@ -1453,6 +1453,14 @@ public final class OrchestrationService {
                         .build();
             }
 
+            if (registry.contains("CHAT") && isReminderAutomationRequest(text)) {
+                return OrchestrationResult.builder()
+                        .status(OrchestrationResult.Status.EXECUTE)
+                        .reasoning("reminder automation request routed to CHAT tools")
+                        .tasks(List.of(new AgentTask("CHAT", text, Map.of("flow", "reminder-automation"))))
+                        .build();
+            }
+
             if (registry.contains("SPEECH_GEN") && isComfortStoryRequest(text)) {
                 String gentleVoice = voiceCatalog.findByMood("comforting")
                         .map(VoiceProfile::voiceId)
@@ -1509,6 +1517,44 @@ public final class OrchestrationService {
             }
 
             return null;
+        }
+
+        private static boolean isReminderAutomationRequest(String text) {
+            if (text == null || text.isBlank()) {
+                return false;
+            }
+            String normalized = text.toLowerCase(Locale.ROOT);
+            boolean asksReminderAction = containsAny(normalized,
+                    "提醒我",
+                    "提醒一下",
+                    "发一条消息",
+                    "发消息",
+                    "给我发",
+                    "通知我",
+                    "叫我",
+                    "定时",
+                    "闹钟");
+            if (!asksReminderAction) {
+                return false;
+            }
+            return containsAny(normalized,
+                    "今天",
+                    "明天",
+                    "后天",
+                    "上午",
+                    "下午",
+                    "中午",
+                    "晚上",
+                    "早上",
+                    "凌晨",
+                    "每天",
+                    "每周",
+                    "每月",
+                    "每隔",
+                    "分钟",
+                    "小时")
+                    || Pattern.compile("\\d{1,2}[:：]\\d{2}").matcher(normalized).find()
+                    || Pattern.compile("\\d{1,2}\\s*点").matcher(normalized).find();
         }
 
         private static OrchestrationResult chatOnlyPlan(String text, TaskScratchpad scratchpad) {

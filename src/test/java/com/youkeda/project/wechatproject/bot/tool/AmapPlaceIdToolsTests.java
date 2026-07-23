@@ -18,8 +18,8 @@ class AmapPlaceIdToolsTests {
         MockRestServiceServer server = MockRestServiceServer.bindTo(restTemplate).build();
         server.expect(requestTo("https://restapi.amap.com/v3/place/text?key=d7db5a1d05aed595cac96d966a7a3471&keywords=西湖&offset=3&page=1&extensions=base&output=JSON&city=杭州&citylimit=true&types=110000"))
                 .andExpect(queryParam("key", "d7db5a1d05aed595cac96d966a7a3471"))
-                .andExpect(queryParam("keywords", "%E8%A5%BF%E6%B9%96"))
-                .andExpect(queryParam("city", "%E6%9D%AD%E5%B7%9E"))
+                .andExpect(queryParam("keywords", "\u897f\u6e56"))
+                .andExpect(queryParam("city", "\u676d\u5dde"))
                 .andExpect(queryParam("citylimit", "true"))
                 .andExpect(queryParam("types", "110000"))
                 .andExpect(queryParam("offset", "3"))

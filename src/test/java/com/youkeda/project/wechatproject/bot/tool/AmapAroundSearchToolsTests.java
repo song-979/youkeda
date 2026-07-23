@@ -26,7 +26,7 @@ class AmapAroundSearchToolsTests {
                 .andExpect(queryParam("sortrule", "distance"))
                 .andExpect(queryParam("extensions", "base"))
                 .andExpect(queryParam("output", "JSON"))
-                .andExpect(queryParam("keywords", "%E5%92%96%E5%95%A1"))
+                .andExpect(queryParam("keywords", "\u5496\u5561"))
                 .andExpect(queryParam("types", "050000"))
                 .andRespond(withSuccess("""
                         {

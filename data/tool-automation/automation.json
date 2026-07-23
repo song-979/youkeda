@@ -169,12 +169,89 @@
     "title" : "吃饭",
     "remindAt" : 1784788500.000000000,
     "message" : "吃饭",
-    "status" : "PENDING",
+    "status" : "MISSED",
     "createdAt" : 1784788386.875488000,
-    "updatedAt" : 1784788504.018784300,
-    "failureMessage" : "waiting for context refresh: missing latest context token for userId=o9cq805WvMDTjlS0Ksv0gpzc7ln8@im.wechat",
+    "updatedAt" : 1784792396.959232000,
+    "failureMessage" : "missed while application was offline",
     "sendAttempts" : 0,
     "recurringTaskId" : null
+  }, {
+    "id" : "R-F56F91DF",
+    "title" : "下班提醒",
+    "remindAt" : 1784790600.000000000,
+    "message" : "下班了",
+    "status" : "FAILED",
+    "createdAt" : 1784790561.311924500,
+    "updatedAt" : 1784790600.062846000,
+    "failureMessage" : "not logged in",
+    "sendAttempts" : 3,
+    "recurringTaskId" : null
+  }, {
+    "id" : "R-D2C76AEE",
+    "title" : "提醒喝水",
+    "remindAt" : 1784794560.000000000,
+    "message" : "该喝水啦！记得补充水分哦~\uD83D\uDCA7",
+    "status" : "SENT",
+    "createdAt" : 1784794478.277418600,
+    "updatedAt" : 1784794561.068362400,
+    "failureMessage" : null,
+    "sendAttempts" : 1,
+    "recurringTaskId" : "RR-296F56E5"
+  }, {
+    "id" : "R-BFBD1853",
+    "title" : "提醒喝水",
+    "remindAt" : 1784794680.000000000,
+    "message" : "该喝水啦！记得补充水分哦~\uD83D\uDCA7",
+    "status" : "SENT",
+    "createdAt" : 1784794561.072960300,
+    "updatedAt" : 1784794682.210756400,
+    "failureMessage" : null,
+    "sendAttempts" : 1,
+    "recurringTaskId" : "RR-296F56E5"
+  }, {
+    "id" : "R-8117BBB3",
+    "title" : "提醒喝水",
+    "remindAt" : 1784794800.000000000,
+    "message" : "该喝水啦！记得补充水分哦~\uD83D\uDCA7",
+    "status" : "SENT",
+    "createdAt" : 1784794682.236866100,
+    "updatedAt" : 1784794800.402280900,
+    "failureMessage" : null,
+    "sendAttempts" : 1,
+    "recurringTaskId" : "RR-296F56E5"
+  }, {
+    "id" : "R-21A2693F",
+    "title" : "提醒喝水",
+    "remindAt" : 1784794920.000000000,
+    "message" : "该喝水啦！记得补充水分哦~\uD83D\uDCA7",
+    "status" : "DELETED",
+    "createdAt" : 1784794800.405330900,
+    "updatedAt" : 1784794814.383024200,
+    "failureMessage" : null,
+    "sendAttempts" : 0,
+    "recurringTaskId" : "RR-296F56E5"
+  }, {
+    "id" : "R-7214D61F",
+    "title" : "提醒喝水",
+    "remindAt" : 1784822700.000000000,
+    "message" : "记得喝水哦！保持身体水分充足。",
+    "status" : "DELETED",
+    "createdAt" : 1784793141.385829600,
+    "updatedAt" : 1784793892.577886100,
+    "failureMessage" : null,
+    "sendAttempts" : 0,
+    "recurringTaskId" : "RR-7A9163BC"
+  }, {
+    "id" : "R-8C7BA3E0",
+    "title" : "提醒喝水",
+    "remindAt" : 1784822700.000000000,
+    "message" : "记得喝水哦！保持身体水分充足。",
+    "status" : "PENDING",
+    "createdAt" : 1784795586.492758300,
+    "updatedAt" : 1784795586.492758300,
+    "failureMessage" : null,
+    "sendAttempts" : 0,
+    "recurringTaskId" : "RR-7A9163BC"
   } ],
   "scheduleItems" : [ {
     "id" : "S-4A962503",
@@ -206,6 +283,30 @@
     "status" : "DELETED",
     "createdAt" : 1784780981.096499200,
     "updatedAt" : 1784781862.073058600,
+    "failureMessage" : null
+  }, {
+    "id" : "RR-296F56E5",
+    "title" : "提醒喝水",
+    "scheduleType" : "CRON",
+    "scheduleExpression" : "0 */2 * * * *",
+    "message" : "该喝水啦！记得补充水分哦~\uD83D\uDCA7",
+    "timeZone" : "Asia/Shanghai",
+    "nextRunAt" : 1784794920.000000000,
+    "status" : "DELETED",
+    "createdAt" : 1784794478.268425700,
+    "updatedAt" : 1784794814.382022600,
+    "failureMessage" : null
+  }, {
+    "id" : "RR-7A9163BC",
+    "title" : "提醒喝水",
+    "scheduleType" : "DAILY",
+    "scheduleExpression" : "00:05",
+    "message" : "记得喝水哦！保持身体水分充足。",
+    "timeZone" : "Asia/Shanghai",
+    "nextRunAt" : 1784822700.000000000,
+    "status" : "ACTIVE",
+    "createdAt" : 1784793141.376541100,
+    "updatedAt" : 1784793141.376541100,
     "failureMessage" : null
   } ],
   "recipientBinding" : {
