@@ -18,8 +18,8 @@ class AmapPlaceIdToolsTests {
         MockRestServiceServer server = MockRestServiceServer.bindTo(restTemplate).build();
         server.expect(requestTo("https://restapi.amap.com/v3/place/text?key=d7db5a1d05aed595cac96d966a7a3471&keywords=%E8%A5%BF%E6%B9%96&offset=3&page=1&extensions=base&output=JSON&city=%E6%9D%AD%E5%B7%9E&citylimit=true&types=110000"))
                 .andExpect(queryParam("key", "d7db5a1d05aed595cac96d966a7a3471"))
-                .andExpect(queryParam("keywords", "\u897f\u6e56"))
-                .andExpect(queryParam("city", "\u676d\u5dde"))
+                .andExpect(queryParam("keywords", "%E8%A5%BF%E6%B9%96"))
+                .andExpect(queryParam("city", "%E6%9D%AD%E5%B7%9E"))
                 .andExpect(queryParam("citylimit", "true"))
                 .andExpect(queryParam("types", "110000"))
                 .andExpect(queryParam("offset", "3"))
@@ -45,7 +45,7 @@ class AmapPlaceIdToolsTests {
                         }
                         """, MediaType.APPLICATION_JSON));
 
-        String result = new AmapPlaceIdTools(restTemplate).queryPlaceIds("\u897f\u6e56", "\u676d\u5dde", "110000", 3);
+        String result = new AmapPlaceIdTools(restTemplate, "").queryPlaceIds("\u897f\u6e56", "\u676d\u5dde", "110000", 3);
 
         assertThat(result)
                 .contains("\u9ad8\u5fb7\u5730\u70b9\u0049\u0044\u67e5\u8be2\u7ed3\u679c")
