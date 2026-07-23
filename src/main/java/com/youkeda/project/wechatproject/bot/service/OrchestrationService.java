@@ -11,12 +11,16 @@ import com.youkeda.project.wechatproject.bot.service.VoiceService.TextToSpeechCl
 import com.youkeda.project.wechatproject.bot.service.VoiceService.TtsResult;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceCatalog;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceProfile;
+import com.youkeda.project.wechatproject.bot.tool.MotouTool;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.content.Media;
+import org.springframework.util.MimeType;
+import org.springframework.util.MimeTypeUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -28,6 +32,9 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
 
 import java.io.IOException;
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -41,6 +48,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -177,21 +185,25 @@ public final class OrchestrationService {
                 log.debug("history expired for user={}", userId);
                 return List.of();
             }
-            slot.lastAccess = System.currentTimeMillis();
-            return new ArrayList<>(slot.messages);
+            synchronized (slot) {
+                slot.lastAccess = System.currentTimeMillis();
+                return new ArrayList<>(slot.messages);
+            }
         }
 
         @Override
         public void append(String userId, String userMessage, String assistantReply) {
             long now = System.currentTimeMillis();
             UserSlot slot = store.computeIfAbsent(userId, k -> new UserSlot(now));
-            slot.lastAccess = now;
+            synchronized (slot) {
+                slot.lastAccess = now;
 
-            slot.messages.addLast(new ChatRequest.Message("user", userMessage));
-            slot.messages.addLast(new ChatRequest.Message("assistant", assistantReply));
+                slot.messages.addLast(new ChatRequest.Message("user", userMessage));
+                slot.messages.addLast(new ChatRequest.Message("assistant", assistantReply));
 
-            while (slot.messages.size() > maxMessages) {
-                slot.messages.removeFirst();
+                while (slot.messages.size() > maxMessages) {
+                    slot.messages.removeFirst();
+                }
             }
         }
 
@@ -199,12 +211,14 @@ public final class OrchestrationService {
         public void appendUserMessage(String userId, String userMessage) {
             long now = System.currentTimeMillis();
             UserSlot slot = store.computeIfAbsent(userId, k -> new UserSlot(now));
-            slot.lastAccess = now;
+            synchronized (slot) {
+                slot.lastAccess = now;
 
-            slot.messages.addLast(new ChatRequest.Message("user", userMessage));
+                slot.messages.addLast(new ChatRequest.Message("user", userMessage));
 
-            while (slot.messages.size() > maxMessages) {
-                slot.messages.removeFirst();
+                while (slot.messages.size() > maxMessages) {
+                    slot.messages.removeFirst();
+                }
             }
         }
 
@@ -390,16 +404,23 @@ public final class OrchestrationService {
         private final AiModelClient chatClient;
         private final AgentProperties agentProperties;
         private final ChatClient toolChatClient;
+        private final String toolCategories;
 
         public ChatAgent(AiModelClient chatClient) {
-            this(chatClient, null, null);
+            this(chatClient, null, null, "");
         }
 
         public ChatAgent(AiModelClient chatClient, AgentProperties agentProperties,
                          ToolChatClientFactory toolChatClientFactory) {
+            this(chatClient, agentProperties, toolChatClientFactory, "");
+        }
+
+        public ChatAgent(AiModelClient chatClient, AgentProperties agentProperties,
+                         ToolChatClientFactory toolChatClientFactory, String toolCategories) {
             this.chatClient = chatClient;
             this.agentProperties = agentProperties;
             this.toolChatClient = toolChatClientFactory != null ? toolChatClientFactory.create() : null;
+            this.toolCategories = toolCategories != null ? toolCategories : "";
         }
 
         @Override
@@ -409,9 +430,13 @@ public final class OrchestrationService {
 
         @Override
         public AgentCapability getCapability() {
+            String desc = "Handles dialogue, writing, analysis, vision-language responses, and tool-assisted runtime tasks.";
+            if (!toolCategories.isEmpty()) {
+                desc += " Internal tool categories: " + toolCategories + ".";
+            }
             return new AgentCapability(
                     "chat-generation",
-                    "Handles dialogue, writing, analysis, vision-language responses, and tool-assisted runtime tasks through its internal tool loop.",
+                    desc,
                     List.of("dialogue", "writing", "analysis", "vision", "runtime-tools"),
                     "text"
             );
@@ -424,30 +449,39 @@ public final class OrchestrationService {
             List<String> imageUrls = stringList(task.parameters().get("imageUrls"));
             List<ChatRequest.Message> history = historyList(task.parameters().get("history"));
 
-            String response = canUseToolLoop(imageUrls)
-                    ? chatWithTools(task.instruction(), history)
+            String response = canUseToolLoop()
+                    ? chatWithTools(task.instruction(), imageUrls, history)
                     : chatClient.chatStream(task.instruction(), imageUrls, history);
+
+            String motouGifPath = MotouTool.getAndClearLastGifPath();
+            if (motouGifPath != null && (response == null || !response.contains("[MOTOU_GIF:"))) {
+                response = "[MOTOU_GIF:" + motouGifPath + "]\n" + (response != null ? response : "");
+            }
+
             log.info("ChatAgent response: {} chars", response != null ? response.length() : 0);
             return AgentResult.success(task.taskId(), response, response);
         }
 
-        private boolean canUseToolLoop(List<String> imageUrls) {
-            return toolChatClient != null && (imageUrls == null || imageUrls.isEmpty());
+        private boolean canUseToolLoop() {
+            return toolChatClient != null;
         }
 
-        private String chatWithTools(String instruction, List<ChatRequest.Message> history) throws IOException {
+        private String chatWithTools(String instruction, List<String> imageUrls,
+                                      List<ChatRequest.Message> history) throws IOException {
             try {
                 return toolChatClient.prompt()
-                        .messages(toSpringAiMessages(instruction, history))
+                        .messages(toSpringAiMessages(instruction, imageUrls, history))
+                        .toolContext(Map.of("imageBase64Urls", imageUrls != null ? imageUrls : List.of()))
                         .call()
                         .content();
             } catch (RuntimeException e) {
                 log.warn("ChatAgent tool loop failed, falling back to legacy chat client: {}", e.getMessage());
-                return chatClient.chatStream(instruction, List.of(), history);
+                return chatClient.chatStream(instruction, imageUrls, history);
             }
         }
 
-        private List<Message> toSpringAiMessages(String instruction, List<ChatRequest.Message> history) {
+        private List<Message> toSpringAiMessages(String instruction, List<String> imageUrls,
+                                                  List<ChatRequest.Message> history) {
             List<Message> messages = new ArrayList<>();
             String systemPrompt = agentProperties != null ? agentProperties.getSystemPrompt() : null;
             if (systemPrompt != null && !systemPrompt.isBlank()) {
@@ -461,8 +495,26 @@ public final class OrchestrationService {
                     }
                 }
             }
-            messages.add(new UserMessage(instruction != null ? instruction : ""));
+            String text = instruction != null ? instruction : "";
+            if (imageUrls != null && !imageUrls.isEmpty()) {
+                List<Media> mediaList = new ArrayList<>();
+                for (String imageUrl : imageUrls) {
+                    MimeType mimeType = detectMimeType(imageUrl);
+                    mediaList.add(new Media(mimeType, URI.create(imageUrl)));
+                }
+                messages.add(UserMessage.builder().text(text).media(mediaList).build());
+            } else {
+                messages.add(new UserMessage(text));
+            }
             return messages;
+        }
+
+        private static MimeType detectMimeType(String dataUrl) {
+            if (dataUrl.contains("image/png")) return MimeTypeUtils.IMAGE_PNG;
+            if (dataUrl.contains("image/jpg") || dataUrl.contains("image/jpeg")) return MimeTypeUtils.IMAGE_JPEG;
+            if (dataUrl.contains("image/gif")) return MimeTypeUtils.IMAGE_GIF;
+            if (dataUrl.contains("image/webp")) return MimeTypeUtils.parseMimeType("image/webp");
+            return MimeTypeUtils.IMAGE_PNG;
         }
 
         private static Message toSpringAiMessage(ChatRequest.Message historyMessage) {
@@ -845,8 +897,8 @@ public final class OrchestrationService {
                 - You do NOT execute tools yourself. CHAT may use an internal tool-calling loop for runtime information, system/environment lookups, and future integrations.
                 - If the request requires runtime information, external actions, integration data, or a capability that may exist as an internal tool, route to CHAT. Do not claim the system cannot do it just because the tool list is not shown to you; CHAT will answer normally if a tool exists and explain the limitation if no suitable tool exists.
                 - Only route to sub-agents when their unique capability is needed:
-                  * CHAT: content generation (creative writing, analysis of user-provided images, open-ended conversation, generating text that will be spoken, tool-assisted runtime tasks, AND generating file content — see file generation rules below)
-                  * IMAGE_GEN: generating new images
+                  * CHAT: content generation (creative writing, analysis of user-provided images, open-ended conversation, generating text that will be spoken, tool-assisted runtime tasks, AND generating file content — see file generation rules below. Check CHAT's internal tool categories in the agent list above to decide routing.)
+                  * IMAGE_GEN: generating new static images (NOT GIFs)
                   * SPEECH_GEN: converting text to audio/speech
 
                 File generation rules (via CHAT):
@@ -1224,7 +1276,10 @@ public final class OrchestrationService {
         private static final Logger log = LoggerFactory.getLogger(MessageRouter.class);
         private static final Pattern FILE_MARKER = Pattern.compile(
                 "\\[FILE:(.+?)]\\r?\\n(.*?)\\r?\\n\\[/FILE]", Pattern.DOTALL);
+        private static final Pattern MOTOU_GIF_MARKER = Pattern.compile(
+                "\\[MOTOU_GIF:(.+?)]");
 
+        private final ConcurrentHashMap<String, ReentrantLock> userLocks = new ConcurrentHashMap<>();
         private final OrchestratorAgent orchestrator;
         private final AgentRegistry registry;
         private final ConversationMemory memory;
@@ -1248,8 +1303,17 @@ public final class OrchestrationService {
         }
 
         public ModelReply route(String userId, String text, List<String> imageBase64Urls) throws IOException {
+            ReentrantLock lock = userLocks.computeIfAbsent(userId, k -> new ReentrantLock());
+            lock.lock();
+            try {
             List<ChatRequest.Message> history = memory != null ? memory.getHistory(userId) : List.of();
-            ImageMemory imageMemory = resolveImageMemory(userId, text);
+            ImageMemory imageMemory = imageBase64Urls.isEmpty()
+                    ? resolveImageMemory(userId)
+                    : ImageMemory.empty();
+
+            if (!imageBase64Urls.isEmpty() && memory != null) {
+                memory.rememberImageContext(userId, imageBase64Urls, text);
+            }
 
             UserRequest request = new UserRequest(
                     userId,
@@ -1328,6 +1392,9 @@ public final class OrchestrationService {
             ModelReply finalReply = buildFinalReply(result);
             persistMemory(userId, text, result, finalReply);
             return finalReply;
+            } finally {
+                lock.unlock();
+            }
         }
 
         private OrchestrationResult specialCasePlan(UserRequest request) {
@@ -1515,8 +1582,8 @@ public final class OrchestrationService {
             return "generated image";
         }
 
-        private ImageMemory resolveImageMemory(String userId, String text) {
-            if (memory == null || !referencesImage(text)) {
+        private ImageMemory resolveImageMemory(String userId) {
+            if (memory == null) {
                 return ImageMemory.empty();
             }
             List<String> imageUrls = memory.getLatestImageDataUrls(userId);
@@ -1541,6 +1608,20 @@ public final class OrchestrationService {
             }
 
             List<ModelReply.ImagePayload> images = new ArrayList<>();
+            if (textReply != null) {
+                Matcher motouMatcher = MOTOU_GIF_MARKER.matcher(textReply);
+                if (motouMatcher.find()) {
+                    String gifPath = motouMatcher.group(1).trim();
+                    try {
+                        byte[] gifBytes = Files.readAllBytes(Path.of(gifPath));
+                        filePayload = new ModelReply.FilePayload(gifBytes, "motou.gif");
+                        textReply = motouMatcher.replaceFirst("").trim();
+                        log.info("loaded MOTOU_GIF from path={}, size={} bytes, will send as file", gifPath, gifBytes.length);
+                    } catch (IOException e) {
+                        log.error("failed to read MOTOU_GIF from path={}", gifPath, e);
+                    }
+                }
+            }
             ModelReply.AudioPayload audio = null;
 
             for (TaskScratchpad.ExecutionRecord record : scratchpad.records()) {
@@ -1579,6 +1660,9 @@ public final class OrchestrationService {
             }
             if (filePayload != null && !images.isEmpty()) {
                 return ModelReply.mixedWithFile(null, images, filePayload);
+            }
+            if (filePayload != null && textReply != null && !textReply.isBlank() && images.isEmpty() && audio == null) {
+                return ModelReply.mixedWithFile(textReply, List.of(), filePayload);
             }
             if (filePayload != null) {
                 return ModelReply.file(filePayload.bytes(), filePayload.fileName());
@@ -1692,22 +1776,6 @@ public final class OrchestrationService {
                     "\u8bf4\u660e",
                     "\u770b\u770b");
             return wantImage && wantDescribe;
-        }
-
-        private static boolean referencesImage(String text) {
-            if (text == null || text.isBlank() || !text.contains("\u56fe")) {
-                return false;
-            }
-            return containsAny(text,
-                    "\u8fd9\u5f20",
-                    "\u8fd9\u5e45",
-                    "\u521a\u624d",
-                    "\u4e0a\u4e00",
-                    "\u7ee7\u7eed",
-                    "\u518d",
-                    "\u4fee\u6539",
-                    "\u57fa\u4e8e",
-                    "\u91cc");
         }
 
         private static boolean containsAny(String text, String... keywords) {

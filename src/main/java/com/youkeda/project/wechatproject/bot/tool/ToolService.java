@@ -22,6 +22,8 @@ import java.time.Clock;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * Spring AI tools extension point.
@@ -31,8 +33,13 @@ import java.util.List;
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties({ToolService.ToolProperties.class, AutomationProperties.class})
+@EnableConfigurationProperties({
+        ToolService.ToolProperties.class,
+        WeatherTools.WeatherProperties.class
+})
 @ConditionalOnProperty(prefix = "agent.tools", name = "enabled", havingValue = "true", matchIfMissing = true)
-public class ToolService {
+public class
+ToolService {
 
     @Bean
     @ConditionalOnMissingBean
@@ -113,14 +120,26 @@ public class ToolService {
     public RecipientBindingListener recipientBindingListener(AutomationStore automationStore,
                                                              ObjectProvider<MessageBridge> messageBridgeProvider) {
         return new RecipientBindingListener(automationStore, Clock.systemDefaultZone(), messageBridgeProvider);
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.weather", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public WeatherTools weatherTools(WeatherTools.WeatherProperties weatherProperties) {
+        return new WeatherTools(weatherProperties);
     }
 
     public interface ProjectTool {
+        /** 工具能力类别，用于编排模型路由决策。如 "information", "web_content", "media_generation" */
+        default String category() { return ""; }
     }
 
     public static class ToolRuntime {
 
         private static final Logger log = LoggerFactory.getLogger(ToolRuntime.class);
+
+        private static final Map<String, String> CATEGORY_LABELS = Map.of(
+                "information", "信息查询（时间、天气、搜索）",
+                "web_content", "网页内容获取",
+                "media_generation", "媒体生成（GIF表情）"
+        );
 
         private final List<ProjectTool> tools;
 
@@ -139,6 +158,17 @@ public class ToolService {
 
         public boolean isEmpty() {
             return tools.isEmpty();
+        }
+
+        /** 汇总所有工具的能力类别，用于编排模型路由。去重后按字母排序。 */
+        public String getCategorySummary() {
+            return tools.stream()
+                    .map(ProjectTool::category)
+                    .filter(c -> !c.isEmpty())
+                    .distinct()
+                    .sorted()
+                    .map(c -> c + "(" + CATEGORY_LABELS.getOrDefault(c, c) + ")")
+                    .collect(Collectors.joining(", "));
         }
     }
 
@@ -160,6 +190,9 @@ public class ToolService {
     }
 
     public static class SystemTools implements ProjectTool {
+
+        @Override
+        public String category() { return "information"; }
 
         @Tool(name = "get_current_datetime", description = "Get the current date and time for the application timezone.")
         public String getCurrentDateTime() {
