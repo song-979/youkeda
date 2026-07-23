@@ -32,9 +32,9 @@ import java.util.stream.Collectors;
  * should only consume ToolRuntime or ToolChatClientFactory when it needs tools.
  */
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties({ToolService.ToolProperties.class, AutomationProperties.class})
 @EnableConfigurationProperties({
         ToolService.ToolProperties.class,
+        AutomationProperties.class,
         WeatherTools.WeatherProperties.class
 })
 @ConditionalOnProperty(prefix = "agent.tools", name = "enabled", havingValue = "true", matchIfMissing = true)
@@ -120,6 +120,9 @@ ToolService {
     public RecipientBindingListener recipientBindingListener(AutomationStore automationStore,
                                                              ObjectProvider<MessageBridge> messageBridgeProvider) {
         return new RecipientBindingListener(automationStore, Clock.systemDefaultZone(), messageBridgeProvider);
+    }
+
+    @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.tools.weather", name = "enabled", havingValue = "true", matchIfMissing = true)
     public WeatherTools weatherTools(WeatherTools.WeatherProperties weatherProperties) {
