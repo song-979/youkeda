@@ -1,0 +1,85 @@
+{
+  "reminders" : [ {
+    "id" : "R-02F77B8A",
+    "title" : "吃药提醒",
+    "remindAt" : 1784706079.000000000,
+    "message" : "该吃药了！",
+    "status" : "SENT",
+    "createdAt" : 1784705902.903160200,
+    "updatedAt" : 1784706079.307778300,
+    "failureMessage" : null,
+    "sendAttempts" : 1
+  }, {
+    "id" : "R-31168108",
+    "title" : "吃药提醒",
+    "remindAt" : 1784708000.000000000,
+    "message" : "该吃药啦！记得按时服药哦～",
+    "status" : "SENT",
+    "createdAt" : 1784707945.313811900,
+    "updatedAt" : 1784708000.293454700,
+    "failureMessage" : null,
+    "sendAttempts" : 1
+  }, {
+    "id" : "R-62F5C7F1",
+    "title" : "健身提醒",
+    "remindAt" : 1784708529.000000000,
+    "message" : "该去健身了！",
+    "status" : "SENT",
+    "createdAt" : 1784708502.125348500,
+    "updatedAt" : 1784708529.767946200,
+    "failureMessage" : null,
+    "sendAttempts" : 1
+  }, {
+    "id" : "R-C823B80A",
+    "title" : "开会",
+    "remindAt" : 1784710245.000000000,
+    "message" : "开会",
+    "status" : "SENT",
+    "createdAt" : 1784710237.814527500,
+    "updatedAt" : 1784710245.541888400,
+    "failureMessage" : null,
+    "sendAttempts" : 1
+  }, {
+    "id" : "R-61720AF9",
+    "title" : "冷笑话时间",
+    "remindAt" : 1784710305.000000000,
+    "message" : "为什么程序员分不清万圣节和圣诞节？  \n因为 Oct 31 == Dec 25！",
+    "status" : "SENT",
+    "createdAt" : 1784710280.610585900,
+    "updatedAt" : 1784710305.589094900,
+    "failureMessage" : null,
+    "sendAttempts" : 1
+  }, {
+    "id" : "R-FEB9277D",
+    "title" : "冷笑话时间（5分钟后）",
+    "remindAt" : 1784711345.000000000,
+    "message" : "为什么程序员分不清万圣节和圣诞节？  \n因为 Oct 31 == Dec 25！",
+    "status" : "SENT",
+    "createdAt" : 1784711050.260612700,
+    "updatedAt" : 1784711345.854192000,
+    "failureMessage" : null,
+    "sendAttempts" : 1
+  } ],
+  "scheduleItems" : [ {
+    "id" : "S-4A962503",
+    "title" : "开会",
+    "startAt" : 1784768400.000000000,
+    "endAt" : 1784772000.000000000,
+    "notes" : "",
+    "createdAt" : 1784714127.271773100,
+    "updatedAt" : 1784714127.271773100
+  }, {
+    "id" : "S-ED7BA14D",
+    "title" : "去购物",
+    "startAt" : 1784786400.000000000,
+    "endAt" : 1784790000.000000000,
+    "notes" : "",
+    "createdAt" : 1784714127.280397400,
+    "updatedAt" : 1784714127.280397400
+  } ],
+  "recipientBinding" : {
+    "recipientId" : "o9cq805WvMDTjlS0Ksv0gpzc7ln8@im.wechat",
+    "boundAt" : 1784705879.655348500,
+    "updatedAt" : 1784705879.655348500
+  }
+}
