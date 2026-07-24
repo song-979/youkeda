@@ -754,7 +754,7 @@ public class AutomationRuntime implements InitializingBean {
         }
     }
 
-    private static boolean isRetryableError(Exception e) {
+    private static boolean isContextTokenError(Exception e) {
         if (e == null) {
             return false;
         }

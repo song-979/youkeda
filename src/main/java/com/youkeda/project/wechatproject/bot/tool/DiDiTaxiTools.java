@@ -49,7 +49,7 @@ public class DiDiTaxiTools implements ToolService.ProjectTool {
     static final long ESTIMATE_SESSION_TTL_MINUTES = 5;
 
     // -------------------------------------------------------------------------
-    // ThreadLocal user tracking — set by MessageRouter before tool execution
+    // ThreadLocal user tracking: set by the request orchestrator before tool execution.
     // -------------------------------------------------------------------------
 
     private static final ThreadLocal<String> CURRENT_USER = new ThreadLocal<>();
@@ -62,14 +62,14 @@ public class DiDiTaxiTools implements ToolService.ProjectTool {
      */
     private static final ThreadLocal<Boolean> ESTIMATE_CALLED_THIS_REQUEST = new ThreadLocal<>();
 
-    /** Set by {@code MessageRouter.route()} before the orchestration loop. */
+    /** Set before the orchestration loop starts executing tools. */
     public static void setCurrentUser(String userId) {
         if (userId != null && !userId.isBlank()) {
             CURRENT_USER.set(userId);
         }
     }
 
-    /** Clear by {@code MessageRouter.route()} in its finally block. */
+    /** Clear in the caller's finally block after tool execution. */
     public static void clearCurrentUser() {
         CURRENT_USER.remove();
         ESTIMATE_CALLED_THIS_REQUEST.remove();
