@@ -929,7 +929,7 @@ public final class OrchestrationService {
                 - If the request requires runtime information, external actions, integration data, or a capability that may exist as an internal tool, route to CHAT. Do not claim the system cannot do it just because the tool list is not shown to you; CHAT will answer normally if a tool exists and explain the limitation if no suitable tool exists.
                 - Only route to sub-agents when their unique capability is needed:
                   * CHAT: content generation (creative writing, analysis of user-provided images, open-ended conversation, generating text that will be spoken, tool-assisted runtime tasks, AND generating file content — see file generation rules below. Check CHAT's internal tool categories in the agent list above to decide routing.)
-                  * IMAGE_GEN: generating new static images (NOT GIFs)
+                  * IMAGE_GEN: generating new static images only. NOT for GIFs, animated stickers, emoji packs, or 表情包 — those must route to CHAT (CHAT has media_generation tools).
                   * SPEECH_GEN: converting text to audio/speech
 
                 Location / POI / Map / Navigation routing rules (CRITICAL):
