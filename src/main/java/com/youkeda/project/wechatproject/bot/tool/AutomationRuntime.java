@@ -34,18 +34,41 @@ public class AutomationRuntime implements InitializingBean {
     private final AutomationProperties properties;
     private final Clock clock;
     private final ZoneId zoneId;
+    private final WeatherTools weatherTools;
+    private final ScheduledTaskExecutor scheduledTaskExecutor;
 
     public AutomationRuntime(AutomationStore store,
                              ReminderScheduler scheduler,
                              ReminderDispatcher dispatcher,
                              AutomationProperties properties,
                              Clock clock) {
+        this(store, scheduler, dispatcher, properties, clock, null);
+    }
+
+    public AutomationRuntime(AutomationStore store,
+                             ReminderScheduler scheduler,
+                             ReminderDispatcher dispatcher,
+                             AutomationProperties properties,
+                             Clock clock,
+                             WeatherTools weatherTools) {
+        this(store, scheduler, dispatcher, properties, clock, weatherTools, null);
+    }
+
+    public AutomationRuntime(AutomationStore store,
+                             ReminderScheduler scheduler,
+                             ReminderDispatcher dispatcher,
+                             AutomationProperties properties,
+                             Clock clock,
+                             WeatherTools weatherTools,
+                             ScheduledTaskExecutor scheduledTaskExecutor) {
         this.store = store;
         this.scheduler = scheduler;
         this.dispatcher = dispatcher;
         this.properties = properties;
         this.clock = clock;
         this.zoneId = ZoneId.of(properties.getTimeZone());
+        this.weatherTools = weatherTools;
+        this.scheduledTaskExecutor = scheduledTaskExecutor;
     }
 
     @Override
@@ -91,10 +114,52 @@ public class AutomationRuntime implements InitializingBean {
                 now,
                 null,
                 0,
+                AutomationStore.AutomationActionType.TEXT,
+                null,
                 null);
         store.saveReminder(reminder);
         scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
         return ReminderResult.success(reminder, "reminder created");
+    }
+
+    public ReminderResult createWeatherReminder(String title,
+                                                String remindAtText,
+                                                String location,
+                                                String weatherMode,
+                                                String message) {
+        AutomationStore.AutomationActionType actionType = parseWeatherActionType(weatherMode);
+        if (actionType == null) {
+            return ReminderResult.failure("weatherMode must be CURRENT or FORECAST");
+        }
+        String normalizedLocation = normalizeRequired(location, "location");
+        if (normalizedLocation == null) {
+            return ReminderResult.failure("location is required");
+        }
+        return createActionReminder(title, remindAtText, normalizeOptional(message, title), actionType, normalizedLocation);
+    }
+
+    public ReminderResult createLlmTask(String title,
+                                        String runAtText,
+                                        String instruction,
+                                        String originalRequest,
+                                        List<String> expectedToolCategories) {
+        String normalizedTitle = normalizeRequired(title, "title");
+        String normalizedInstruction = normalizeRequired(instruction, "instruction");
+        if (normalizedTitle == null) {
+            return ReminderResult.failure("title is required");
+        }
+        if (normalizedInstruction == null) {
+            return ReminderResult.failure("instruction is required");
+        }
+        return createTaskReminder(
+                normalizedTitle,
+                runAtText,
+                normalizedTitle,
+                AutomationStore.AutomationTaskKind.LLM_TASK,
+                normalizedInstruction,
+                normalizeOptional(originalRequest, normalizedInstruction),
+                expectedToolCategories,
+                2);
     }
 
     public List<AutomationStore.Reminder> listReminders(AutomationStore.ReminderStatus status) {
@@ -154,11 +219,143 @@ public class AutomationRuntime implements InitializingBean {
                 clock.instant(),
                 null,
                 reminder.sendAttempts(),
+                effectiveActionType(reminder),
+                reminder.actionTarget(),
                 reminder.recurringTaskId());
         store.saveReminder(updated);
         scheduler.cancel(updated.id());
         scheduler.schedule(updated, () -> triggerReminder(updated.id()));
         return ReminderResult.success(updated, "reminder updated");
+    }
+
+    public ReminderResult updateLlmTask(String id,
+                                        String title,
+                                        String runAtText,
+                                        String instruction,
+                                        String originalRequest,
+                                        List<String> expectedToolCategories) {
+        Optional<AutomationStore.Reminder> existing = store.findReminder(id);
+        if (existing.isEmpty()) {
+            return ReminderResult.failure("reminder not found: " + id);
+        }
+        AutomationStore.Reminder reminder = existing.get();
+        if (reminder.status() != AutomationStore.ReminderStatus.PENDING) {
+            return ReminderResult.failure("reminder cannot be updated because it is " + reminder.status());
+        }
+        if (effectiveTaskKind(reminder) != AutomationStore.AutomationTaskKind.LLM_TASK) {
+            return ReminderResult.failure("target reminder is not an LLM_TASK");
+        }
+
+        Instant remindAt = reminder.remindAt();
+        if (runAtText != null && !runAtText.isBlank()) {
+            try {
+                remindAt = parseInstant(runAtText);
+            } catch (DateTimeParseException | IllegalArgumentException e) {
+                return ReminderResult.failure("runAt must be an ISO datetime, for example 2026-07-22T20:00:00+08:00");
+            }
+            if (!remindAt.isAfter(clock.instant())) {
+                return ReminderResult.failure("runAt must be in the future");
+            }
+        }
+
+        AutomationStore.Reminder updated = new AutomationStore.Reminder(
+                reminder.id(),
+                normalizeOptional(title, reminder.title()),
+                remindAt,
+                reminder.message(),
+                reminder.status(),
+                reminder.createdAt(),
+                clock.instant(),
+                null,
+                reminder.sendAttempts(),
+                effectiveActionType(reminder),
+                reminder.actionTarget(),
+                reminder.recurringTaskId(),
+                AutomationStore.AutomationTaskKind.LLM_TASK,
+                normalizeOptional(instruction, reminder.instruction()),
+                normalizeOptional(originalRequest, reminder.originalRequest()),
+                expectedToolCategories != null ? expectedToolCategories : reminder.expectedToolCategories(),
+                effectiveMaxRetries(reminder));
+        store.saveReminder(updated);
+        scheduler.cancel(updated.id());
+        scheduler.schedule(updated, () -> triggerReminder(updated.id()));
+        return ReminderResult.success(updated, "llm task updated");
+    }
+
+    private ReminderResult createActionReminder(String title,
+                                                String remindAtText,
+                                                String message,
+                                                AutomationStore.AutomationActionType actionType,
+                                                String actionTarget) {
+        return createTaskReminder(title, remindAtText, message, AutomationStore.AutomationTaskKind.TEXT_REMINDER,
+                null, null, List.of(), 0, actionType, actionTarget);
+    }
+
+    private ReminderResult createTaskReminder(String title,
+                                              String remindAtText,
+                                              String message,
+                                              AutomationStore.AutomationTaskKind taskKind,
+                                              String instruction,
+                                              String originalRequest,
+                                              List<String> expectedToolCategories,
+                                              int maxRetries) {
+        return createTaskReminder(title, remindAtText, message, taskKind, instruction, originalRequest,
+                expectedToolCategories, maxRetries, AutomationStore.AutomationActionType.TEXT, null);
+    }
+
+    private ReminderResult createTaskReminder(String title,
+                                              String remindAtText,
+                                              String message,
+                                              AutomationStore.AutomationTaskKind taskKind,
+                                              String instruction,
+                                              String originalRequest,
+                                              List<String> expectedToolCategories,
+                                              int maxRetries,
+                                              AutomationStore.AutomationActionType actionType,
+                                              String actionTarget) {
+        String normalizedTitle = normalizeRequired(title, "title");
+        String normalizedMessage = normalizeOptional(message, normalizedTitle);
+        if (normalizedTitle == null) {
+            return ReminderResult.failure("title is required");
+        }
+
+        Instant remindAt;
+        try {
+            remindAt = parseInstant(remindAtText);
+        } catch (DateTimeParseException | IllegalArgumentException e) {
+            return ReminderResult.failure("remindAt must be an ISO datetime, for example 2026-07-22T20:00:00+08:00");
+        }
+
+        Instant now = clock.instant();
+        if (!remindAt.isAfter(now)) {
+            return ReminderResult.failure("remindAt must be in the future");
+        }
+        if (resolveRecipientId() == null) {
+            return ReminderResult.failure("reminder recipient is not bound yet");
+        }
+
+        AutomationStore.Reminder reminder = new AutomationStore.Reminder(
+                newReminderId(),
+                normalizedTitle,
+                remindAt,
+                normalizedMessage,
+                AutomationStore.ReminderStatus.PENDING,
+                now,
+                now,
+                null,
+                0,
+                actionType,
+                actionTarget,
+                null,
+                taskKind,
+                instruction,
+                originalRequest,
+                expectedToolCategories,
+                maxRetries);
+        store.saveReminder(reminder);
+        scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+        return ReminderResult.success(reminder,
+                taskKind == AutomationStore.AutomationTaskKind.LLM_TASK ? "llm task created" : "reminder created");
     }
 
     public ReminderResult deleteReminder(String id) {
@@ -284,6 +481,72 @@ public class AutomationRuntime implements InitializingBean {
                                                        AutomationStore.RecurringScheduleType scheduleType,
                                                        String scheduleExpression,
                                                        String message) {
+        return createRecurringActionReminder(title, scheduleType, scheduleExpression, message,
+                AutomationStore.AutomationActionType.TEXT, null);
+    }
+
+    public RecurringTaskResult createRecurringWeatherReminder(String title,
+                                                              AutomationStore.RecurringScheduleType scheduleType,
+                                                              String scheduleExpression,
+                                                              String location,
+                                                              String weatherMode,
+                                                              String message) {
+        AutomationStore.AutomationActionType actionType = parseWeatherActionType(weatherMode);
+        if (actionType == null) {
+            return RecurringTaskResult.failure("weatherMode must be CURRENT or FORECAST");
+        }
+        String normalizedLocation = normalizeRequired(location, "location");
+        if (normalizedLocation == null) {
+            return RecurringTaskResult.failure("location is required");
+        }
+        return createRecurringActionReminder(title, scheduleType, scheduleExpression, message, actionType, normalizedLocation);
+    }
+
+    public RecurringTaskResult createRecurringLlmTask(String title,
+                                                      AutomationStore.RecurringScheduleType scheduleType,
+                                                      String scheduleExpression,
+                                                      String instruction,
+                                                      String originalRequest,
+                                                      List<String> expectedToolCategories) {
+        String normalizedInstruction = normalizeRequired(instruction, "instruction");
+        if (normalizedInstruction == null) {
+            return RecurringTaskResult.failure("instruction is required");
+        }
+        return createRecurringTask(
+                title,
+                scheduleType,
+                scheduleExpression,
+                title,
+                AutomationStore.AutomationActionType.TEXT,
+                null,
+                AutomationStore.AutomationTaskKind.LLM_TASK,
+                normalizedInstruction,
+                normalizeOptional(originalRequest, normalizedInstruction),
+                expectedToolCategories,
+                2);
+    }
+
+    private RecurringTaskResult createRecurringActionReminder(String title,
+                                                             AutomationStore.RecurringScheduleType scheduleType,
+                                                             String scheduleExpression,
+                                                             String message,
+                                                             AutomationStore.AutomationActionType actionType,
+                                                             String actionTarget) {
+        return createRecurringTask(title, scheduleType, scheduleExpression, message, actionType, actionTarget,
+                AutomationStore.AutomationTaskKind.TEXT_REMINDER, null, null, List.of(), 0);
+    }
+
+    private RecurringTaskResult createRecurringTask(String title,
+                                                    AutomationStore.RecurringScheduleType scheduleType,
+                                                    String scheduleExpression,
+                                                    String message,
+                                                    AutomationStore.AutomationActionType actionType,
+                                                    String actionTarget,
+                                                    AutomationStore.AutomationTaskKind taskKind,
+                                                    String instruction,
+                                                    String originalRequest,
+                                                    List<String> expectedToolCategories,
+                                                    int maxRetries) {
         String normalizedTitle = normalizeRequired(title, "title");
         String normalizedExpression = normalizeRequired(scheduleExpression, "scheduleExpression");
         if (normalizedTitle == null) {
@@ -317,10 +580,20 @@ public class AutomationRuntime implements InitializingBean {
                 AutomationStore.RecurringTaskStatus.ACTIVE,
                 now,
                 now,
-                null);
+                null,
+                actionType,
+                actionTarget,
+                taskKind,
+                instruction,
+                originalRequest,
+                expectedToolCategories,
+                maxRetries);
         store.saveRecurringTask(task);
         scheduleRecurringInstance(task);
-        return RecurringTaskResult.success(task, "recurring reminder created");
+        return RecurringTaskResult.success(task,
+                taskKind == AutomationStore.AutomationTaskKind.LLM_TASK
+                        ? "recurring llm task created"
+                        : "recurring reminder created");
     }
 
     public RecurringTaskResult deleteRecurringTask(String id) {
@@ -374,11 +647,16 @@ public class AutomationRuntime implements InitializingBean {
             return;
         }
 
+        if (effectiveTaskKind(triggering) == AutomationStore.AutomationTaskKind.LLM_TASK) {
+            triggerLlmTask(triggering, recipientId);
+            return;
+        }
+
         int attempts = Math.max(1, properties.getMaxSendAttempts());
         Exception lastError = null;
         for (int i = 1; i <= attempts; i++) {
             try {
-                dispatcher.send(recipientId, formatReminderMessage(triggering));
+                dispatcher.send(recipientId, formatTriggeredMessage(triggering));
                 store.saveReminder(copyReminder(triggering, AutomationStore.ReminderStatus.SENT, null, i));
                 advanceRecurringTaskIfNeeded(triggering);
                 return;
@@ -409,6 +687,65 @@ public class AutomationRuntime implements InitializingBean {
                     AutomationStore.ReminderStatus.FAILED,
                     lastError != null ? lastError.getMessage() : "send failed",
                     attempts));
+        }
+    }
+
+    private void triggerLlmTask(AutomationStore.Reminder reminder, String recipientId) {
+        if (scheduledTaskExecutor == null) {
+            failTriggeredLlmTask(reminder, recipientId, "scheduled task executor is not available", 0);
+            return;
+        }
+        String instruction = normalizeRequired(reminder.instruction(), "instruction");
+        if (instruction == null) {
+            failTriggeredLlmTask(reminder, recipientId, "scheduled task instruction is required", 0);
+            return;
+        }
+
+        int retries = effectiveMaxRetries(reminder);
+        int attempts = retries + 1;
+        String lastError = null;
+        for (int i = 1; i <= attempts; i++) {
+            try {
+                ScheduledTaskExecutionResult result = scheduledTaskExecutor.execute(new ScheduledTaskExecutionRequest(
+                        reminder.id(),
+                        recipientId,
+                        reminder.title(),
+                        instruction,
+                        reminder.originalRequest(),
+                        reminder.expectedToolCategories(),
+                        reminder.remindAt(),
+                        reminder.recurringTaskId() != null && !reminder.recurringTaskId().isBlank()));
+                if (result != null && result.success()) {
+                    String message = normalizeOptional(result.message(), "scheduled task completed");
+                    dispatcher.send(recipientId, message);
+                    store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.SENT, null, i));
+                    advanceRecurringTaskIfNeeded(reminder);
+                    return;
+                }
+                lastError = result != null && result.errorMessage() != null
+                        ? result.errorMessage()
+                        : "scheduled task failed";
+            } catch (Exception e) {
+                lastError = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                log.warn("scheduled task execution failed: id={}, attempt={}/{}", reminder.id(), i, attempts, e);
+            }
+        }
+        failTriggeredLlmTask(reminder, recipientId, lastError, attempts);
+    }
+
+    private void failTriggeredLlmTask(AutomationStore.Reminder reminder,
+                                      String recipientId,
+                                      String failureMessage,
+                                      int attempts) {
+        String reason = failureMessage != null && !failureMessage.isBlank()
+                ? failureMessage
+                : "scheduled task failed";
+        store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.FAILED, reason, attempts));
+        pauseRecurringTaskIfNeeded(reminder, reason);
+        try {
+            dispatcher.send(recipientId, "计划任务执行失败：" + reason);
+        } catch (Exception e) {
+            log.warn("failed to send scheduled task failure notice: id={}", reminder.id(), e);
         }
     }
 
@@ -508,7 +845,14 @@ public class AutomationRuntime implements InitializingBean {
                 clock.instant(),
                 failureMessage,
                 sendAttempts,
-                reminder.recurringTaskId());
+                effectiveActionType(reminder),
+                reminder.actionTarget(),
+                reminder.recurringTaskId(),
+                effectiveTaskKind(reminder),
+                reminder.instruction(),
+                reminder.originalRequest(),
+                reminder.expectedToolCategories(),
+                effectiveMaxRetries(reminder));
     }
 
     private Instant parseInstant(String value) {
@@ -611,7 +955,14 @@ public class AutomationRuntime implements InitializingBean {
                 clock.instant(),
                 null,
                 0,
-                task.id());
+                effectiveActionType(task),
+                task.actionTarget(),
+                task.id(),
+                effectiveTaskKind(task),
+                task.instruction(),
+                task.originalRequest(),
+                task.expectedToolCategories(),
+                effectiveMaxRetries(task));
         store.saveReminder(reminder);
         scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
     }
@@ -657,11 +1008,105 @@ public class AutomationRuntime implements InitializingBean {
                 status,
                 task.createdAt(),
                 clock.instant(),
+                failureMessage,
+                effectiveActionType(task),
+                task.actionTarget(),
+                effectiveTaskKind(task),
+                task.instruction(),
+                task.originalRequest(),
+                task.expectedToolCategories(),
+                effectiveMaxRetries(task));
+    }
+
+    private void pauseRecurringTaskIfNeeded(AutomationStore.Reminder reminder, String failureMessage) {
+        if (reminder.recurringTaskId() == null || reminder.recurringTaskId().isBlank()) {
+            return;
+        }
+        Optional<AutomationStore.RecurringTask> existing = store.findRecurringTask(reminder.recurringTaskId());
+        if (existing.isEmpty()) {
+            return;
+        }
+        AutomationStore.RecurringTask task = existing.get();
+        AutomationStore.RecurringTask paused = copyRecurringTask(
+                task,
+                task.nextRunAt(),
+                AutomationStore.RecurringTaskStatus.PAUSED,
                 failureMessage);
+        store.saveRecurringTask(paused);
+        for (AutomationStore.Reminder pending : store.listReminders(AutomationStore.ReminderStatus.PENDING)) {
+            if (task.id().equals(pending.recurringTaskId())) {
+                deleteReminder(pending.id());
+            }
+        }
     }
 
     private static AutomationStore.ScheduleItemStatus effectiveScheduleStatus(AutomationStore.ScheduleItem item) {
         return item.status() != null ? item.status() : AutomationStore.ScheduleItemStatus.ACTIVE;
+    }
+
+    private String formatTriggeredMessage(AutomationStore.Reminder reminder) {
+        return switch (effectiveActionType(reminder)) {
+            case TEXT -> formatReminderMessage(reminder);
+            case WEATHER_CURRENT -> formatActionMessage(reminder, executeWeatherAction(reminder, false));
+            case WEATHER_FORECAST -> formatActionMessage(reminder, executeWeatherAction(reminder, true));
+        };
+    }
+
+    private String executeWeatherAction(AutomationStore.Reminder reminder, boolean forecast) {
+        if (weatherTools == null) {
+            throw new IllegalStateException("weather tool is not available");
+        }
+        String location = normalizeRequired(reminder.actionTarget(), "location");
+        if (location == null) {
+            throw new IllegalStateException("weather location is required");
+        }
+        return forecast
+                ? weatherTools.getWeatherForecast(location)
+                : weatherTools.getCurrentWeather(location);
+    }
+
+    private String formatActionMessage(AutomationStore.Reminder reminder, String actionResult) {
+        String prefix = normalizeOptional(reminder.message(), reminder.title());
+        return prefix + "\n" + actionResult;
+    }
+
+    private static AutomationStore.AutomationActionType effectiveActionType(AutomationStore.Reminder reminder) {
+        return reminder.actionType() != null ? reminder.actionType() : AutomationStore.AutomationActionType.TEXT;
+    }
+
+    private static AutomationStore.AutomationActionType effectiveActionType(AutomationStore.RecurringTask task) {
+        return task.actionType() != null ? task.actionType() : AutomationStore.AutomationActionType.TEXT;
+    }
+
+    private static AutomationStore.AutomationTaskKind effectiveTaskKind(AutomationStore.Reminder reminder) {
+        return reminder.taskKind() != null
+                ? reminder.taskKind()
+                : AutomationStore.AutomationTaskKind.TEXT_REMINDER;
+    }
+
+    private static AutomationStore.AutomationTaskKind effectiveTaskKind(AutomationStore.RecurringTask task) {
+        return task.taskKind() != null
+                ? task.taskKind()
+                : AutomationStore.AutomationTaskKind.TEXT_REMINDER;
+    }
+
+    private static int effectiveMaxRetries(AutomationStore.Reminder reminder) {
+        return reminder.maxRetries() > 0 ? reminder.maxRetries() : 2;
+    }
+
+    private static int effectiveMaxRetries(AutomationStore.RecurringTask task) {
+        return task.maxRetries() > 0 ? task.maxRetries() : 2;
+    }
+
+    private static AutomationStore.AutomationActionType parseWeatherActionType(String weatherMode) {
+        if (weatherMode == null || weatherMode.isBlank()) {
+            return AutomationStore.AutomationActionType.WEATHER_FORECAST;
+        }
+        return switch (weatherMode.trim().toUpperCase(Locale.ROOT)) {
+            case "CURRENT", "BASE", "NOW" -> AutomationStore.AutomationActionType.WEATHER_CURRENT;
+            case "FORECAST", "ALL" -> AutomationStore.AutomationActionType.WEATHER_FORECAST;
+            default -> null;
+        };
     }
 
     private String formatReminderMessage(AutomationStore.Reminder reminder) {

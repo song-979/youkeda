@@ -1,5 +1,7 @@
 package com.youkeda.project.wechatproject.bot.tool;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 
@@ -15,6 +17,7 @@ public class AutomationTools implements ToolService.ProjectTool {
     private final AutomationRuntime runtime;
     private final AutomationProperties properties;
     private final ZoneId zoneId;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public AutomationTools(AutomationRuntime runtime, AutomationProperties properties) {
         this.runtime = runtime;
@@ -97,6 +100,96 @@ public class AutomationTools implements ToolService.ProjectTool {
             return "Failed to delete reminder: " + result.message();
         }
         return "Reminder deleted: id=" + result.reminder().id() + ", title=" + result.reminder().title();
+    }
+
+    @Tool(name = "create_weather_reminder", description = "Create a one-time weather reminder. When triggered, it queries the weather tool and sends the weather result as WeChat text.")
+    public String createWeatherReminder(
+            @ToolParam(description = "Short reminder title.") String title,
+            @ToolParam(description = "Reminder time, ISO format with timezone, for example 2026-07-22T20:00:00+08:00.") String remindAt,
+            @ToolParam(description = "City, district, or adcode, for example Hangzhou, 杭州, or 330100.") String location,
+            @ToolParam(required = false, description = "Weather mode: CURRENT for live weather, FORECAST for today and next 3 days. Defaults to FORECAST.") String weatherMode,
+            @ToolParam(required = false, description = "Optional text prefix to send before the weather result.") String message) {
+        AutomationRuntime.ReminderResult result = runtime.createWeatherReminder(
+                title, remindAt, location, weatherMode, message);
+        if (!result.success()) {
+            return "Failed to create weather reminder: " + result.message();
+        }
+        AutomationStore.Reminder reminder = result.reminder();
+        return "Weather reminder created: id=" + reminder.id()
+                + ", title=" + reminder.title()
+                + ", remindAt=" + format(reminder.remindAt())
+                + ", location=" + reminder.actionTarget()
+                + ", mode=" + reminder.actionType()
+                + ", status=" + reminder.status();
+    }
+
+    @Tool(name = "create_llm_task", description = "Create a one-time delayed action. At trigger time the saved instruction is sent to the AI orchestration flow, which may call any available tools needed by the task.")
+    public String createLlmTask(
+            @ToolParam(description = "Short task title.") String title,
+            @ToolParam(description = "Trigger time, ISO format with timezone, for example 2026-07-22T20:00:00+08:00.") String runAt,
+            @ToolParam(description = "Instruction to execute at trigger time. Write it as a current action, for example: Query Hangzhou Yuhang weather now and tell the user.") String instruction,
+            @ToolParam(required = false, description = "Original user request for audit/debugging.") String originalRequest,
+            @ToolParam(required = false, description = "Expected tool categories for audit only; this does not restrict model tool calls.") List<String> expectedToolCategories) {
+        AutomationRuntime.ReminderResult result = runtime.createLlmTask(
+                title, runAt, instruction, originalRequest, expectedToolCategories);
+        if (!result.success()) {
+            return "Failed to create LLM task: " + result.message();
+        }
+        AutomationStore.Reminder reminder = result.reminder();
+        return "LLM task created: id=" + reminder.id()
+                + ", title=" + reminder.title()
+                + ", runAt=" + format(reminder.remindAt())
+                + ", status=" + reminder.status();
+    }
+
+    @Tool(name = "create_recurring_llm_task", description = "Create a recurring delayed action. Each trigger sends the saved instruction to the AI orchestration flow at that future time.")
+    public String createRecurringLlmTask(
+            @ToolParam(description = "Short task title.") String title,
+            @ToolParam(description = "Schedule type: DAILY, WEEKLY, or CRON.") String scheduleType,
+            @ToolParam(description = "Schedule expression. DAILY example: 09:30. WEEKLY example: FRIDAY 18:00. CRON example: 0 15 10 * * *.") String scheduleExpression,
+            @ToolParam(description = "Instruction to execute at each trigger time.") String instruction,
+            @ToolParam(required = false, description = "Original user request for audit/debugging.") String originalRequest,
+            @ToolParam(required = false, description = "Expected tool categories for audit only; this does not restrict model tool calls.") List<String> expectedToolCategories) {
+        AutomationStore.RecurringScheduleType parsedType;
+        try {
+            parsedType = AutomationStore.RecurringScheduleType.valueOf(scheduleType.trim().toUpperCase());
+        } catch (Exception e) {
+            return "Invalid recurring schedule type. Use DAILY, WEEKLY, or CRON.";
+        }
+        AutomationRuntime.RecurringTaskResult result = runtime.createRecurringLlmTask(
+                title, parsedType, scheduleExpression, instruction, originalRequest, expectedToolCategories);
+        if (!result.success()) {
+            return "Failed to create recurring LLM task: " + result.message();
+        }
+        AutomationStore.RecurringTask task = result.task();
+        return "Recurring LLM task created: id=" + task.id()
+                + ", title=" + task.title()
+                + ", type=" + task.scheduleType()
+                + ", expression=" + task.scheduleExpression()
+                + ", nextRunAt=" + format(task.nextRunAt())
+                + ", status=" + task.status();
+    }
+
+    @Tool(name = "apply_automation_plan", description = "Apply a structured JSON automation plan. Use this for reminders and delayed AI tasks. JSON fields: operation CREATE/UPDATE/DELETE/LIST, kind TEXT_REMINDER/LLM_TASK, title, runAt, message, instruction, originalRequest, expectedToolCategories, scheduleType, scheduleExpression, targetId, status.")
+    public String applyAutomationPlan(
+            @ToolParam(description = "Structured automation plan JSON.") String planJson) {
+        AutomationPlan plan;
+        try {
+            plan = objectMapper.readValue(planJson, AutomationPlan.class);
+        } catch (JsonProcessingException e) {
+            return "Invalid automation plan JSON: " + e.getOriginalMessage();
+        }
+        String operation = upper(plan.operation);
+        if (operation == null) {
+            return "Invalid automation plan: operation is required.";
+        }
+        return switch (operation) {
+            case "CREATE" -> applyCreatePlan(plan);
+            case "UPDATE" -> applyUpdatePlan(plan);
+            case "DELETE" -> applyDeletePlan(plan);
+            case "LIST" -> listReminders(plan.status);
+            default -> "Invalid automation plan operation. Use CREATE, UPDATE, DELETE, or LIST.";
+        };
     }
 
     @Tool(name = "create_schedule_item", description = "Create a private schedule item. Schedule items record time blocks only; they do not send reminders by themselves.")
@@ -208,6 +301,36 @@ public class AutomationTools implements ToolService.ProjectTool {
                 + ", status=" + task.status();
     }
 
+    @Tool(name = "create_recurring_weather_reminder", description = "Create a recurring weather reminder. When each instance triggers, it queries the weather tool and sends the result as WeChat text.")
+    public String createRecurringWeatherReminder(
+            @ToolParam(description = "Short reminder title.") String title,
+            @ToolParam(description = "Schedule type: DAILY, WEEKLY, or CRON.") String scheduleType,
+            @ToolParam(description = "Schedule expression. DAILY example: 09:30. WEEKLY example: MONDAY 09:00. CRON example: 0 0 9 * * MON.") String scheduleExpression,
+            @ToolParam(description = "City, district, or adcode, for example Hangzhou, 杭州, or 330100.") String location,
+            @ToolParam(required = false, description = "Weather mode: CURRENT for live weather, FORECAST for today and next 3 days. Defaults to FORECAST.") String weatherMode,
+            @ToolParam(required = false, description = "Optional text prefix to send before the weather result.") String message) {
+        AutomationStore.RecurringScheduleType parsedType;
+        try {
+            parsedType = AutomationStore.RecurringScheduleType.valueOf(scheduleType.trim().toUpperCase());
+        } catch (Exception e) {
+            return "Invalid recurring schedule type. Use DAILY, WEEKLY, or CRON.";
+        }
+        AutomationRuntime.RecurringTaskResult result = runtime.createRecurringWeatherReminder(
+                title, parsedType, scheduleExpression, location, weatherMode, message);
+        if (!result.success()) {
+            return "Failed to create recurring weather reminder: " + result.message();
+        }
+        AutomationStore.RecurringTask task = result.task();
+        return "Recurring weather reminder created: id=" + task.id()
+                + ", title=" + task.title()
+                + ", type=" + task.scheduleType()
+                + ", expression=" + task.scheduleExpression()
+                + ", location=" + task.actionTarget()
+                + ", mode=" + task.actionType()
+                + ", nextRunAt=" + format(task.nextRunAt())
+                + ", status=" + task.status();
+    }
+
     @Tool(name = "list_recurring_tasks", description = "List recurring reminder rules by status. Omit status to list all rules.")
     public String listRecurringTasks(
             @ToolParam(required = false, description = "Optional status: ACTIVE, PAUSED, CANCELLED, DELETED.") String status) {
@@ -245,6 +368,81 @@ public class AutomationTools implements ToolService.ProjectTool {
             return "Failed to delete recurring task: " + result.message();
         }
         return "Recurring task deleted: id=" + result.task().id() + ", title=" + result.task().title();
+    }
+
+    private String applyCreatePlan(AutomationPlan plan) {
+        String kind = upper(plan.kind);
+        if ("LLM_TASK".equals(kind)) {
+            if (plan.scheduleType != null && !plan.scheduleType.isBlank()) {
+                return createRecurringLlmTask(plan.title, plan.scheduleType, plan.scheduleExpression,
+                        plan.instruction, plan.originalRequest, plan.expectedToolCategories);
+            }
+            return createLlmTask(plan.title, plan.runAt, plan.instruction,
+                    plan.originalRequest, plan.expectedToolCategories);
+        }
+        if ("TEXT_REMINDER".equals(kind) || kind == null) {
+            if (plan.scheduleType != null && !plan.scheduleType.isBlank()) {
+                return createRecurringReminder(plan.title, plan.scheduleType, plan.scheduleExpression, plan.message);
+            }
+            return createReminder(plan.title, plan.runAt, plan.message);
+        }
+        return "Invalid automation plan kind. Use TEXT_REMINDER or LLM_TASK.";
+    }
+
+    private String applyUpdatePlan(AutomationPlan plan) {
+        if (plan.targetId == null || plan.targetId.isBlank()) {
+            return "Failed to update automation: targetId is required. List pending reminders and ask the user which one to update if the target is ambiguous.";
+        }
+        String kind = upper(plan.kind);
+        if ("LLM_TASK".equals(kind)) {
+            AutomationRuntime.ReminderResult result = runtime.updateLlmTask(
+                    plan.targetId, plan.title, plan.runAt, plan.instruction,
+                    plan.originalRequest, plan.expectedToolCategories);
+            if (!result.success()) {
+                return "Failed to update LLM task: " + result.message();
+            }
+            AutomationStore.Reminder reminder = result.reminder();
+            return "LLM task updated: id=" + reminder.id()
+                    + ", title=" + reminder.title()
+                    + ", runAt=" + format(reminder.remindAt())
+                    + ", status=" + reminder.status();
+        }
+        AutomationRuntime.ReminderResult result = runtime.updateReminder(
+                plan.targetId, plan.title, plan.runAt, plan.message);
+        if (!result.success()) {
+            return "Failed to update reminder: " + result.message();
+        }
+        AutomationStore.Reminder reminder = result.reminder();
+        return "Reminder updated: id=" + reminder.id()
+                + ", title=" + reminder.title()
+                + ", remindAt=" + format(reminder.remindAt())
+                + ", status=" + reminder.status();
+    }
+
+    private String applyDeletePlan(AutomationPlan plan) {
+        if (plan.targetId == null || plan.targetId.isBlank()) {
+            return "Failed to delete automation: targetId is required.";
+        }
+        return deleteReminder(plan.targetId);
+    }
+
+    private static String upper(String value) {
+        return value == null || value.isBlank() ? null : value.trim().toUpperCase();
+    }
+
+    private static class AutomationPlan {
+        public String operation;
+        public String kind;
+        public String targetId;
+        public String title;
+        public String runAt;
+        public String message;
+        public String instruction;
+        public String originalRequest;
+        public List<String> expectedToolCategories;
+        public String scheduleType;
+        public String scheduleExpression;
+        public String status;
     }
 
     private AutomationStore.ReminderStatus parseStatus(String status) {

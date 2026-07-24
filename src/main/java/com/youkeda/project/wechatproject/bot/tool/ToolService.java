@@ -92,7 +92,9 @@ public class ToolService {
     public AutomationRuntime automationRuntime(AutomationStore automationStore,
                                                AutomationRuntime.ReminderScheduler reminderScheduler,
                                                AutomationProperties properties,
-                                               ObjectProvider<ILinkClient> ilinkClientProvider) {
+                                               ObjectProvider<ILinkClient> ilinkClientProvider,
+                                               ObjectProvider<WeatherTools> weatherToolsProvider,
+                                               ObjectProvider<ScheduledTaskExecutor> scheduledTaskExecutorProvider) {
         return new AutomationRuntime(
                 automationStore,
                 reminderScheduler,
@@ -104,7 +106,15 @@ public class ToolService {
                     client.sendText(recipientId, message);
                 },
                 properties,
-                Clock.systemDefaultZone());
+                Clock.systemDefaultZone(),
+                weatherToolsProvider.getIfAvailable(),
+                request -> {
+                    ScheduledTaskExecutor executor = scheduledTaskExecutorProvider.getIfAvailable();
+                    if (executor == null) {
+                        return ScheduledTaskExecutionResult.failure("scheduled task executor is not available");
+                    }
+                    return executor.execute(request);
+                });
     }
 
     @Bean
