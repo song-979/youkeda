@@ -49,6 +49,8 @@ public class WeatherTools implements ToolService.ProjectTool {
     WeatherTools(WeatherProperties properties, RestTemplate restTemplate) {
         this.properties = properties;
         this.restTemplate = restTemplate;
+        log.info("weather tool initialized: amapKeyConfigured={}, amapPrivateKeyConfigured={}",
+                hasText(properties.getAmapKey()), hasText(properties.getAmapPrivateKey()));
     }
 
     @Tool(name = "get_current_weather",
@@ -156,12 +158,17 @@ public class WeatherTools implements ToolService.ProjectTool {
     }
 
     private JsonNode requestWeather(String city, String extensions) {
-        String url = UriComponentsBuilder.fromUriString(WEATHER_URL)
+        boolean signed = hasText(properties.getAmapPrivateKey());
+        log.info("amap weather request: city={}, extensions={}, signed={}", city, extensions, signed);
+        UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(WEATHER_URL)
                 .queryParam("key", properties.getAmapKey())
                 .queryParam("city", city)
                 .queryParam("extensions", extensions)
-                .queryParam("output", "JSON")
-                .build().encode().toUriString();
+                .queryParam("output", "JSON");
+        String url = AmapSignUtil.appendSign(builder, properties.getAmapPrivateKey())
+                .build()
+                .encode()
+                .toUriString();
 
         JsonNode root = parseJson(restTemplate.getForObject(url, String.class));
         ensureAmapSuccess(root);
@@ -173,13 +180,18 @@ public class WeatherTools implements ToolService.ProjectTool {
             return location;
         }
 
-        String url = UriComponentsBuilder.fromUriString(DISTRICT_URL)
+        boolean signed = hasText(properties.getAmapPrivateKey());
+        log.info("amap district request: keywords={}, signed={}", location, signed);
+        UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(DISTRICT_URL)
                 .queryParam("key", properties.getAmapKey())
                 .queryParam("keywords", location)
                 .queryParam("subdistrict", 0)
                 .queryParam("extensions", "base")
-                .queryParam("output", "JSON")
-                .build().encode().toUriString();
+                .queryParam("output", "JSON");
+        String url = AmapSignUtil.appendSign(builder, properties.getAmapPrivateKey())
+                .build()
+                .encode()
+                .toUriString();
 
         JsonNode root = parseJson(restTemplate.getForObject(url, String.class));
         ensureAmapSuccess(root);
@@ -303,6 +315,10 @@ public class WeatherTools implements ToolService.ProjectTool {
         return value != null && !value.isBlank() ? value : "\u672a\u77e5";
     }
 
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
     private static String text(JsonNode node) {
         return node != null && node.isTextual() ? node.asText() : null;
     }
@@ -319,6 +335,7 @@ public class WeatherTools implements ToolService.ProjectTool {
     @ConfigurationProperties(prefix = "agent.tools.weather")
     public static class WeatherProperties {
         private String amapKey;
+        private String amapPrivateKey;
 
         public String getAmapKey() {
             return amapKey;
@@ -326,6 +343,14 @@ public class WeatherTools implements ToolService.ProjectTool {
 
         public void setAmapKey(String amapKey) {
             this.amapKey = amapKey;
+        }
+
+        public String getAmapPrivateKey() {
+            return amapPrivateKey;
+        }
+
+        public void setAmapPrivateKey(String amapPrivateKey) {
+            this.amapPrivateKey = amapPrivateKey;
         }
     }
 }

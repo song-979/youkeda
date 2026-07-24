@@ -79,6 +79,17 @@ public interface AutomationStore {
         DELETED
     }
 
+    enum AutomationActionType {
+        TEXT,
+        WEATHER_CURRENT,
+        WEATHER_FORECAST
+    }
+
+    enum AutomationTaskKind {
+        TEXT_REMINDER,
+        LLM_TASK
+    }
+
     record Reminder(
             String id,
             String title,
@@ -89,7 +100,19 @@ public interface AutomationStore {
             Instant updatedAt,
             String failureMessage,
             int sendAttempts,
-            String recurringTaskId) {
+            AutomationActionType actionType,
+            String actionTarget,
+            String recurringTaskId,
+            AutomationTaskKind taskKind,
+            String instruction,
+            String originalRequest,
+            List<String> expectedToolCategories,
+            int maxRetries) {
+
+        public Reminder {
+            taskKind = taskKind != null ? taskKind : AutomationTaskKind.TEXT_REMINDER;
+            expectedToolCategories = expectedToolCategories != null ? List.copyOf(expectedToolCategories) : List.of();
+        }
 
         public Reminder(String id,
                         String title,
@@ -100,7 +123,39 @@ public interface AutomationStore {
                         Instant updatedAt,
                         String failureMessage,
                         int sendAttempts) {
-            this(id, title, remindAt, message, status, createdAt, updatedAt, failureMessage, sendAttempts, null);
+            this(id, title, remindAt, message, status, createdAt, updatedAt, failureMessage, sendAttempts,
+                    AutomationActionType.TEXT, null, null);
+        }
+
+        public Reminder(String id,
+                        String title,
+                        Instant remindAt,
+                        String message,
+                        ReminderStatus status,
+                        Instant createdAt,
+                        Instant updatedAt,
+                        String failureMessage,
+                        int sendAttempts,
+                        String recurringTaskId) {
+            this(id, title, remindAt, message, status, createdAt, updatedAt, failureMessage, sendAttempts,
+                    AutomationActionType.TEXT, null, recurringTaskId);
+        }
+
+        public Reminder(String id,
+                        String title,
+                        Instant remindAt,
+                        String message,
+                        ReminderStatus status,
+                        Instant createdAt,
+                        Instant updatedAt,
+                        String failureMessage,
+                        int sendAttempts,
+                        AutomationActionType actionType,
+                        String actionTarget,
+                        String recurringTaskId) {
+            this(id, title, remindAt, message, status, createdAt, updatedAt, failureMessage, sendAttempts,
+                    actionType, actionTarget, recurringTaskId, AutomationTaskKind.TEXT_REMINDER,
+                    null, null, List.of(), 0);
         }
     }
 
@@ -136,7 +191,52 @@ public interface AutomationStore {
             RecurringTaskStatus status,
             Instant createdAt,
             Instant updatedAt,
-            String failureMessage) {
+            String failureMessage,
+            AutomationActionType actionType,
+            String actionTarget,
+            AutomationTaskKind taskKind,
+            String instruction,
+            String originalRequest,
+            List<String> expectedToolCategories,
+            int maxRetries) {
+
+        public RecurringTask {
+            taskKind = taskKind != null ? taskKind : AutomationTaskKind.TEXT_REMINDER;
+            expectedToolCategories = expectedToolCategories != null ? List.copyOf(expectedToolCategories) : List.of();
+        }
+
+        public RecurringTask(String id,
+                             String title,
+                             RecurringScheduleType scheduleType,
+                             String scheduleExpression,
+                             String message,
+                             String timeZone,
+                             Instant nextRunAt,
+                             RecurringTaskStatus status,
+                             Instant createdAt,
+                             Instant updatedAt,
+                             String failureMessage) {
+            this(id, title, scheduleType, scheduleExpression, message, timeZone, nextRunAt, status,
+                    createdAt, updatedAt, failureMessage, AutomationActionType.TEXT, null);
+        }
+
+        public RecurringTask(String id,
+                             String title,
+                             RecurringScheduleType scheduleType,
+                             String scheduleExpression,
+                             String message,
+                             String timeZone,
+                             Instant nextRunAt,
+                             RecurringTaskStatus status,
+                             Instant createdAt,
+                             Instant updatedAt,
+                             String failureMessage,
+                             AutomationActionType actionType,
+                             String actionTarget) {
+            this(id, title, scheduleType, scheduleExpression, message, timeZone, nextRunAt, status,
+                    createdAt, updatedAt, failureMessage, actionType, actionTarget,
+                    AutomationTaskKind.TEXT_REMINDER, null, null, List.of(), 0);
+        }
     }
 
     record RecipientBinding(String recipientId, Instant boundAt, Instant updatedAt) {

@@ -33,6 +33,8 @@ import com.youkeda.project.wechatproject.bot.service.VoiceService.SpeechProperti
 import com.youkeda.project.wechatproject.bot.service.VoiceService.SpeechToTextClient;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.TextToSpeechClient;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceCatalog;
+import com.youkeda.project.wechatproject.bot.tool.ScheduledTaskExecutionResult;
+import com.youkeda.project.wechatproject.bot.tool.ScheduledTaskExecutor;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolRuntime;
 import org.slf4j.Logger;
@@ -232,6 +234,20 @@ public class BotAutoConfiguration {
         log.info("creating MessageRouter (orchestration mode)");
         return new MessageRouter(orchestratorAgent, agentRegistry, conversationMemory, voiceCatalog,
                 documentService, orchestratorProperties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnBean(MessageRouter.class)
+    public ScheduledTaskExecutor scheduledTaskExecutor(MessageRouter messageRouter) {
+        return request -> {
+            var reply = messageRouter.routeScheduledTask(request);
+            String text = reply.getTextContent();
+            if (text != null && !text.isBlank()) {
+                return ScheduledTaskExecutionResult.success(text);
+            }
+            return ScheduledTaskExecutionResult.success("计划任务已执行完成。");
+        };
     }
 
     @Bean
