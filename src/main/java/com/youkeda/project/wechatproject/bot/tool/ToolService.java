@@ -36,7 +36,8 @@ import java.util.stream.Collectors;
 @EnableConfigurationProperties({
         ToolService.ToolProperties.class,
         AutomationProperties.class,
-        WeatherTools.WeatherProperties.class
+        WeatherTools.WeatherProperties.class,
+        WorldTimeTools.WorldTimeProperties.class
 })
 @ConditionalOnProperty(prefix = "agent.tools", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class ToolService {

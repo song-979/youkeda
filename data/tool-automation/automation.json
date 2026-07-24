@@ -175,6 +175,28 @@
     "failureMessage" : "waiting for context refresh: missing latest context token for userId=o9cq805WvMDTjlS0Ksv0gpzc7ln8@im.wechat",
     "sendAttempts" : 0,
     "recurringTaskId" : null
+  }, {
+    "id" : "R-90D7A6C6",
+    "title" : "喝水提醒",
+    "remindAt" : 1784788405.000000000,
+    "message" : "该喝水啦！记得补充水分～",
+    "status" : "FAILED",
+    "createdAt" : 1784788108.967530100,
+    "updatedAt" : 1784788405.043535800,
+    "failureMessage" : "missing latest context token for userId=o9cq805WvMDTjlS0Ksv0gpzc7ln8@im.wechat",
+    "sendAttempts" : 3,
+    "recurringTaskId" : null
+  }, {
+    "id" : "R-4368FD1E",
+    "title" : "喝水提醒",
+    "remindAt" : 1784789226.000000000,
+    "message" : "该喝水啦！",
+    "status" : "FAILED",
+    "createdAt" : 1784788630.562604800,
+    "updatedAt" : 1784789226.026854500,
+    "failureMessage" : "missing latest context token for userId=o9cq805WvMDTjlS0Ksv0gpzc7ln8@im.wechat",
+    "sendAttempts" : 3,
+    "recurringTaskId" : null
   } ],
   "scheduleItems" : [ {
     "id" : "S-4A962503",
