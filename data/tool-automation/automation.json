@@ -169,10 +169,10 @@
     "title" : "吃饭",
     "remindAt" : 1784788500.000000000,
     "message" : "吃饭",
-    "status" : "PENDING",
+    "status" : "MISSED",
     "createdAt" : 1784788386.875488000,
-    "updatedAt" : 1784788504.018784300,
-    "failureMessage" : "waiting for context refresh: missing latest context token for userId=o9cq805WvMDTjlS0Ksv0gpzc7ln8@im.wechat",
+    "updatedAt" : 1784858591.114483100,
+    "failureMessage" : "missed while application was offline",
     "sendAttempts" : 0,
     "recurringTaskId" : null
   } ],

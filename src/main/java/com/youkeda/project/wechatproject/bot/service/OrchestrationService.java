@@ -15,6 +15,7 @@ import com.youkeda.project.wechatproject.bot.tool.AmapAroundSearchTools;
 import com.youkeda.project.wechatproject.bot.tool.AmapDirectionTools;
 import com.youkeda.project.wechatproject.bot.tool.DiDiTaxiTools;
 import com.youkeda.project.wechatproject.bot.tool.LocalFileTools;
+import com.youkeda.project.wechatproject.bot.tool.LocationAuthorizationTools;
 import com.youkeda.project.wechatproject.bot.tool.MotouTool;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -1359,6 +1360,7 @@ public final class OrchestrationService {
             ReentrantLock lock = userLocks.computeIfAbsent(userId, k -> new ReentrantLock());
             lock.lock();
             DiDiTaxiTools.setCurrentUser(userId);
+            LocationAuthorizationTools.setCurrentUser(userId);
             try {
             List<ChatRequest.Message> history = memory != null ? memory.getHistory(userId) : List.of();
             ImageMemory imageMemory = imageBase64Urls.isEmpty()
@@ -1448,6 +1450,7 @@ public final class OrchestrationService {
             return finalReply;
             } finally {
                 DiDiTaxiTools.clearCurrentUser();
+                LocationAuthorizationTools.clearCurrentUser();
                 lock.unlock();
             }
         }
@@ -1461,6 +1464,28 @@ public final class OrchestrationService {
                         .status(OrchestrationResult.Status.NEEDS_CLARIFICATION)
                         .reasoning("user sent images without text, need to ask for requirements")
                         .clarificationQuestion("你发送了图片，请问需要我做些什么呢？")
+                        .build();
+            }
+
+            if (isTaxiRequest(text)) {
+                return OrchestrationResult.builder()
+                        .status(OrchestrationResult.Status.EXECUTE)
+                        .reasoning("taxi flow with current-location authorization support")
+                        .tasks(List.of(new AgentTask(
+                                "CHAT",
+                                """
+                                用户正在请求打车/叫车服务。
+
+                                请优先遵守下面流程：
+                                1. 如果用户没有给出明确的出发地坐标，且看起来可能不知道自己当前在哪，请优先调用 `request_phone_location_authorization` 生成手机定位授权链接，而不是只让用户手动描述当前位置。
+                                2. 用户完成授权后，调用 `get_latest_authorized_phone_location` 读取最近一次手机定位结果，把它作为打车起点。
+                                3. 终点如果是地名或地址，再按现有高德工具查询坐标。
+                                4. 在起终点齐全前，不要直接调用滴滴预估或下单。
+                                5. 预估后必须等待用户明确选择车型，下一轮才能继续下单。
+
+                                用户原始请求：%s
+                                """.formatted(text),
+                                Map.of("flow", "taxi-location-auth"))))
                         .build();
             }
 
@@ -1858,6 +1883,21 @@ public final class OrchestrationService {
                     "\u8bf4\u660e",
                     "\u770b\u770b");
             return wantImage && wantDescribe;
+        }
+
+        private static boolean isTaxiRequest(String text) {
+            return containsAny(text,
+                    "打车",
+                    "叫车",
+                    "叫个车",
+                    "滴滴",
+                    "网约车",
+                    "出租车",
+                    "专车",
+                    "快车",
+                    "顺风车",
+                    "代叫车",
+                    "帮我叫车");
         }
 
         private static boolean containsAny(String text, String... keywords) {
