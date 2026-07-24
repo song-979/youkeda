@@ -36,7 +36,8 @@ import java.util.stream.Collectors;
 @EnableConfigurationProperties({
         ToolService.ToolProperties.class,
         AutomationProperties.class,
-        WeatherTools.WeatherProperties.class
+        WeatherTools.WeatherProperties.class,
+        WorldTimeTools.WorldTimeProperties.class
 })
 @ConditionalOnProperty(prefix = "agent.tools", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class ToolService {
@@ -167,6 +168,20 @@ public class ToolService {
         return new AmapStaticMapTools(amapPrivateKey);
     }
 
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.didi", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public DiDiMcpClient diDiMcpClient(@Value("${agent.tools.didi.api-key:}") String apiKey) {
+        return new DiDiMcpClient("https://mcp.didichuxing.com/mcp-servers-sandbox?key=" + apiKey);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.didi", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public DiDiTaxiTools diDiTaxiTools(DiDiMcpClient diDiMcpClient) {
+        return new DiDiTaxiTools(diDiMcpClient);
+    }
+
     public interface ProjectTool {
         /** 工具能力类别，用于编排模型路由决策。例如 "information", "web_content", "media_generation" */
         default String category() { return ""; }
@@ -182,7 +197,8 @@ public class ToolService {
                 "media_generation", "媒体生成（GIF表情）",
                 "automation", "定时提醒与日程（创建提醒、定时任务、日常安排、闹钟）",
                 "local_files", "本地文件检索、读取和发送",
-                "map_navigation", "高德地图（地点搜索、周边搜索、路线规划、静态地图）"
+                "map_navigation", "高德地图（地点搜索、周边搜索、路线规划、静态地图）",
+                "didi_taxi", "滴滴打车（价格预估、叫车、订单查询、取消订单、司机位置、行程链接）"
         );
 
         private final List<ProjectTool> tools;

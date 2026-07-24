@@ -13,6 +13,7 @@ import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceCatalog;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceProfile;
 import com.youkeda.project.wechatproject.bot.tool.AmapAroundSearchTools;
 import com.youkeda.project.wechatproject.bot.tool.AmapDirectionTools;
+import com.youkeda.project.wechatproject.bot.tool.DiDiTaxiTools;
 import com.youkeda.project.wechatproject.bot.tool.LocalFileTools;
 import com.youkeda.project.wechatproject.bot.tool.MotouTool;
 import com.youkeda.project.wechatproject.bot.tool.ScheduledTaskExecutionRequest;
@@ -952,7 +953,7 @@ public final class OrchestrationService {
                 - If the request requires runtime information, external actions, integration data, or a capability that may exist as an internal tool, route to CHAT. Do not claim the system cannot do it just because the tool list is not shown to you; CHAT will answer normally if a tool exists and explain the limitation if no suitable tool exists.
                 - Only route to sub-agents when their unique capability is needed:
                   * CHAT: content generation (creative writing, analysis of user-provided images, open-ended conversation, generating text that will be spoken, tool-assisted runtime tasks, AND generating file content — see file generation rules below. Check CHAT's internal tool categories in the agent list above to decide routing.)
-                  * IMAGE_GEN: generating new static images (NOT GIFs)
+                  * IMAGE_GEN: generating new static images only. NOT for GIFs, animated stickers, emoji packs, or 表情包 — those must route to CHAT (CHAT has media_generation tools).
                   * SPEECH_GEN: converting text to audio/speech
 
                 Location / POI / Map / Navigation routing rules (CRITICAL):
@@ -966,6 +967,13 @@ public final class OrchestrationService {
                 - Explicit examples that MUST go to CHAT: "提醒我XX", "设置闹钟", "定时XX", "X分钟后叫我", "创建日程", "明天X点提醒", "每天X点提醒", "帮我记一下XX", "几点叫我", any reminder/timer/alarm/schedule request.
                 - The system DOES support reminders — do NOT say it doesn't. Route to CHAT and let CHAT handle it.
                 - Do NOT return completed for these queries — CHAT must handle them via its internal tool loop.
+
+                DiDi Taxi / Ride-hailing routing rules (CRITICAL):
+                - When the user asks to hail a taxi, call a car, or request a ride, you MUST route to CHAT. CHAT has internal DiDi tools (didi_taxi_estimate, didi_taxi_create_order, etc.).
+                - CRITICAL: The DiDi taxi flow requires user confirmation on car type before creating an order. Your plan MUST only route ONE task to CHAT — CHAT will handle price estimation internally and present car options to the user. Do NOT plan a create_order task; the order happens in a separate conversation turn after the user explicitly selects a car type.
+                - After an estimate-only CHAT task completes (status=SUCCESS, output contains car type options), the reflect phase MUST return completed — do NOT create follow-up tasks to auto-order.
+                - Only create a create_order task when the user has explicitly confirmed a car type (e.g. "选特惠快车", "叫快车", "确认下单").
+                - Explicit examples that MUST go to CHAT: "打车到XX", "帮我叫车", "叫个车去XX", "从A打车到B", "帮我打车", any ride-hailing/taxi request.
 
                 File generation rules (via CHAT):
                 - When the user asks to generate, export, save, download, or create a file (e.g. Markdown doc, report, summary, data export, weekly report, code file, etc.), route to CHAT.
@@ -1033,6 +1041,7 @@ public final class OrchestrationService {
                 - For SPEECH_GEN tasks: instruction must be ONLY raw text to speak, no directions or markup.
                   * If the text to speak depends on a prior CHAT task's output, use the placeholder {{LAST_CHAT_TEXT}}. The system will automatically replace it with the actual CHAT output text.
                 - If the user asked for a file and the CHAT output contains [FILE:...]...[/FILE] markers, the file was already generated successfully — do not route again.
+                - DiDi Taxi rule: If the CHAT task output contains car type options / price estimates (e.g. "特惠快车", "快车", "价格预估") and the result is SUCCESS, the estimate flow is complete. Return completed — the user needs to choose a car type in the next turn. Do NOT create a follow-up create_order task unless the user explicitly said which car type they want (e.g. "选特惠快车", "叫快车"). Never auto-select a default car type for the user.
                 - You may include an optional "parameters" object on each task.
 
                 Output schemas:
@@ -1379,6 +1388,7 @@ public final class OrchestrationService {
         public ModelReply route(String userId, String text, List<String> imageBase64Urls) throws IOException {
             ReentrantLock lock = userLocks.computeIfAbsent(userId, k -> new ReentrantLock());
             lock.lock();
+            DiDiTaxiTools.setCurrentUser(userId);
             try {
             LocalFileTools.getAndClearPreparedFile();
             List<ChatRequest.Message> history = memory != null ? memory.getHistory(userId) : List.of();
@@ -1468,6 +1478,7 @@ public final class OrchestrationService {
             persistMemory(userId, text, result, finalReply);
             return finalReply;
             } finally {
+                DiDiTaxiTools.clearCurrentUser();
                 lock.unlock();
             }
         }

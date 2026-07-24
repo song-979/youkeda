@@ -8,12 +8,17 @@ import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.util.Map;
 
+@Component
 public class WorldTimeTools implements ToolService.ProjectTool {
+
+    @Override
+    public String category() { return "information"; }
 
     private static final Logger log = LoggerFactory.getLogger(WorldTimeTools.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
