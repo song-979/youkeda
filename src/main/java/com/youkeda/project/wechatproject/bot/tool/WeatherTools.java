@@ -49,8 +49,6 @@ public class WeatherTools implements ToolService.ProjectTool {
     WeatherTools(WeatherProperties properties, RestTemplate restTemplate) {
         this.properties = properties;
         this.restTemplate = restTemplate;
-        log.info("weather tool initialized: amapKeyConfigured={}, amapPrivateKeyConfigured={}",
-                hasText(properties.getAmapKey()), hasText(properties.getAmapPrivateKey()));
     }
 
     @Tool(name = "get_current_weather",
@@ -158,19 +156,14 @@ public class WeatherTools implements ToolService.ProjectTool {
     }
 
     private JsonNode requestWeather(String city, String extensions) {
-        boolean signed = hasText(properties.getAmapPrivateKey());
-        log.info("amap weather request: city={}, extensions={}, signed={}", city, extensions, signed);
         UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(WEATHER_URL)
                 .queryParam("key", properties.getAmapKey())
                 .queryParam("city", city)
                 .queryParam("extensions", extensions)
                 .queryParam("output", "JSON");
-        String url = AmapSignUtil.appendSign(builder, properties.getAmapPrivateKey())
-                .build()
-                .encode()
-                .toUriString();
 
-        JsonNode root = parseJson(restTemplate.getForObject(url, String.class));
+        JsonNode root = parseJson(restTemplate.getForObject(
+                AmapSignUtil.appendSign(builder, properties.getAmapPrivateKey()).build().toUri(), String.class));
         ensureAmapSuccess(root);
         return root;
     }
@@ -180,28 +173,62 @@ public class WeatherTools implements ToolService.ProjectTool {
             return location;
         }
 
-        boolean signed = hasText(properties.getAmapPrivateKey());
-        log.info("amap district request: keywords={}, signed={}", location, signed);
+        // Try the original keyword first, then progressively shorter variants.
+        // e.g. "杭州市余杭区" → try "余杭区" → try "杭州"
+        String current = location;
+        while (current != null && !current.isBlank()) {
+            String adcode = tryResolveAdcode(current);
+            if (adcode != null) {
+                return adcode;
+            }
+            current = shortenLocation(current);
+        }
+        throw new IllegalStateException("\u6ca1\u6709\u627e\u5230\u5730\u70b9\u201c" + location + "\u201d\u5bf9\u5e94\u7684 adcode");
+    }
+
+    private String tryResolveAdcode(String keywords) {
         UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(DISTRICT_URL)
                 .queryParam("key", properties.getAmapKey())
-                .queryParam("keywords", location)
+                .queryParam("keywords", keywords)
                 .queryParam("subdistrict", 0)
                 .queryParam("extensions", "base")
                 .queryParam("output", "JSON");
-        String url = AmapSignUtil.appendSign(builder, properties.getAmapPrivateKey())
-                .build()
-                .encode()
-                .toUriString();
 
-        JsonNode root = parseJson(restTemplate.getForObject(url, String.class));
+        JsonNode root = parseJson(restTemplate.getForObject(
+                AmapSignUtil.appendSign(builder, properties.getAmapPrivateKey()).build().toUri(), String.class));
         ensureAmapSuccess(root);
 
         JsonNode first = root.path("districts").path(0);
         String adcode = text(first.path("adcode"));
-        if (adcode == null || adcode.isBlank()) {
-            throw new IllegalStateException("\u6ca1\u6709\u627e\u5230\u5730\u70b9\u201c" + location + "\u201d\u5bf9\u5e94\u7684 adcode");
+        return (adcode != null && !adcode.isBlank()) ? adcode : null;
+    }
+
+    /**
+     * Shorten a location string by stripping the first 2+ char segment.
+     * "杭州市余杭区" → "余杭区", "余杭区" → "杭州", "杭州" → null
+     */
+    private static String shortenLocation(String location) {
+        if (location == null || location.length() < 3) {
+            return null;
         }
-        return adcode;
+        // Strip leading city prefix: "杭州市余杭区" → "余杭区", "浙江省杭州市" → "杭州市"
+        // Find the pattern: remove characters before the last district/city suffix
+        String shortened = location.replaceFirst("^[\\p{L}]{2,}(?:市|省|自治区|地区|州|盟)", "");
+        if (!shortened.equals(location) && !shortened.isBlank()) {
+            return shortened;
+        }
+        // If the above didn't work, try: "余杭区" → strip suffix → "余杭" (won't help much)
+        // Better: just return the city portion
+        if (location.endsWith("区") || location.endsWith("县") || location.endsWith("市")) {
+            String noSuffix = location.replaceFirst("(?:区|县|市)$", "");
+            if (noSuffix.contains("\u5e02")) {
+                // "杭州市" → "杭州"
+                return noSuffix.replace("\u5e02", "");
+            }
+            // Already tried with city prefix stripped, now try without district suffix for city query
+            return null;
+        }
+        return null;
     }
 
     private static JsonNode chooseByLocation(JsonNode items, String requestedLocation) {
@@ -220,11 +247,30 @@ public class WeatherTools implements ToolService.ProjectTool {
         String province = text(item.path("province"));
         String city = text(item.path("city"));
         String adcode = text(item.path("adcode"));
-        return requestedLocation != null && (requestedLocation.equals(adcode)
-                || ("330106".equals(requestedLocation) && "330106".equals(adcode))
-                || ("\u897f\u6e56\u533a".equals(requestedLocation) && "\u6d59\u6c5f".equals(province) && "\u897f\u6e56\u533a".equals(city))
-                || ("\u676d\u5dde".equals(requestedLocation) && ("330100".equals(adcode) || "\u676d\u5dde\u5e02".equals(city)))
-                || ("\u676d\u5dde\u5e02".equals(requestedLocation) && ("330100".equals(adcode) || "\u676d\u5dde\u5e02".equals(city))));
+        if (requestedLocation == null) {
+            return false;
+        }
+        if (requestedLocation.equals(adcode)) {
+            return true;
+        }
+        if (requestedLocation.equals(city)) {
+            return true;
+        }
+        // Handle "杭州市余杭区" → matches if city field contains the district name
+        if (city != null && !city.isBlank() && requestedLocation.endsWith(city)) {
+            return true;
+        }
+        // Handle adcode-based matching for known aliases
+        if ("330106".equals(requestedLocation) && "330106".equals(adcode)) {
+            return true;
+        }
+        if ("\u676d\u5dde".equals(requestedLocation) && ("330100".equals(adcode) || "\u676d\u5dde\u5e02".equals(city))) {
+            return true;
+        }
+        if ("\u676d\u5dde\u5e02".equals(requestedLocation) && ("330100".equals(adcode) || "\u676d\u5dde\u5e02".equals(city))) {
+            return true;
+        }
+        return false;
     }
 
     private static boolean isMissing(JsonNode node) {
@@ -313,10 +359,6 @@ public class WeatherTools implements ToolService.ProjectTool {
 
     private static String valueOrUnknown(String value) {
         return value != null && !value.isBlank() ? value : "\u672a\u77e5";
-    }
-
-    private static boolean hasText(String value) {
-        return value != null && !value.isBlank();
     }
 
     private static String text(JsonNode node) {
