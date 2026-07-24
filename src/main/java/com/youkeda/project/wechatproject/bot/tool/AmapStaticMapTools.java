@@ -16,7 +16,6 @@ public class AmapStaticMapTools implements ToolService.ProjectTool {
     private static final int MAX_ZOOM = 17;
     private static final String DEFAULT_SIZE = "600*400";
     private static final int DEFAULT_SCALE = 1;
-
     private final String privateKey;
 
     public AmapStaticMapTools(String privateKey) {
@@ -67,7 +66,7 @@ public class AmapStaticMapTools implements ToolService.ProjectTool {
                 .queryParamIfPresent("paths", java.util.Optional.ofNullable(trimToNull(paths)))
                 .queryParam("traffic", Boolean.TRUE.equals(traffic) ? 1 : 0);
 
-        String url = AmapSignUtil.appendSign(builder, privateKey).build().encode().toUriString();
+        String url = AmapSignUtil.appendSign(builder, privateKey).build().toUri().toString();
 
         return """
                 \u9ad8\u5fb7\u9759\u6001\u5730\u56fe\uff1a

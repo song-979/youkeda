@@ -5,6 +5,7 @@ import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
 import com.github.wechat.ilink.sdk.core.listener.OnLoginListener;
 import com.youkeda.project.wechatproject.bot.handler.MessageHandler;
 import com.youkeda.project.wechatproject.bot.tool.AutomationRuntime;
+import com.youkeda.project.wechatproject.bot.tool.SkillTools;
 import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
 import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.DashScopeImageGenClient;
@@ -48,6 +49,10 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import org.springframework.http.client.JdkClientHttpRequestFactory;
+import org.springframework.web.client.RestClient;
+
+import java.net.http.HttpClient;
 import java.util.List;
 
 @Configuration
@@ -60,6 +65,14 @@ import java.util.List;
 public class BotAutoConfiguration {
 
     private static final Logger log = LoggerFactory.getLogger(BotAutoConfiguration.class);
+
+    @Bean
+    public RestClient.Builder restClientBuilder() {
+        HttpClient httpClient = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .build();
+        return RestClient.builder().requestFactory(new JdkClientHttpRequestFactory(httpClient));
+    }
 
     @Bean
     @ConditionalOnMissingBean
@@ -148,11 +161,14 @@ public class BotAutoConfiguration {
     public ChatAgent chatAgent(AiModelClient aiModelClient,
                                AgentProperties props,
                                ObjectProvider<ToolChatClientFactory> toolChatClientFactoryProvider,
-                               ObjectProvider<ToolRuntime> toolRuntimeProvider) {
+                               ObjectProvider<ToolRuntime> toolRuntimeProvider,
+                               ObjectProvider<SkillTools> skillToolsProvider) {
         log.info("creating ChatAgent");
         ToolRuntime toolRuntime = toolRuntimeProvider.getIfAvailable();
         String categories = toolRuntime != null ? toolRuntime.getCategorySummary() : "";
-        return new ChatAgent(aiModelClient, props, toolChatClientFactoryProvider.getIfAvailable(), categories);
+        SkillTools skillTools = skillToolsProvider.getIfAvailable();
+        String skillsSummary = skillTools != null ? skillTools.getSkillsSummary() : "";
+        return new ChatAgent(aiModelClient, props, toolChatClientFactoryProvider.getIfAvailable(), categories, skillsSummary);
     }
 
     @Bean
@@ -239,14 +255,104 @@ public class BotAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnBean(MessageRouter.class)
-    public ScheduledTaskExecutor scheduledTaskExecutor(MessageRouter messageRouter) {
+    public ScheduledTaskExecutor scheduledTaskExecutor(MessageRouter messageRouter,
+                                                        ObjectProvider<ILinkClient> ilinkClientProvider,
+                                                        ObjectProvider<AudioConverter> audioConverterProvider) {
         return request -> {
             var reply = messageRouter.routeScheduledTask(request);
-            String text = reply.getTextContent();
-            if (text != null && !text.isBlank()) {
-                return ScheduledTaskExecutionResult.success(text);
-            }
-            return ScheduledTaskExecutionResult.success("计划任务已执行完成。");
+            ILinkClient client = ilinkClientProvider.getIfAvailable();
+
+            return switch (reply.getType()) {
+                case TEXT -> {
+                    String text = reply.getTextContent();
+                    yield text != null && !text.isBlank()
+                            ? ScheduledTaskExecutionResult.success(text)
+                            : ScheduledTaskExecutionResult.success("计划任务已执行完成。");
+                }
+                case VOICE -> {
+                    var audio = reply.getAudioPayload();
+                    if (audio == null || audio.bytes() == null || audio.bytes().length == 0) {
+                        yield ScheduledTaskExecutionResult.failure("语音生成结果为空");
+                    }
+                    if (client == null) {
+                        yield ScheduledTaskExecutionResult.failure("iLink client 不可用");
+                    }
+                    AudioConverter converter = audioConverterProvider.getIfAvailable();
+                    if (converter == null) {
+                        yield ScheduledTaskExecutionResult.failure("语音转换器不可用");
+                    }
+                    byte[] mp3Bytes = converter.wavToMp3(audio.bytes());
+                    log.info("scheduled task dispatching voice: {} bytes (converted to mp3: {} bytes)",
+                            audio.bytes().length, mp3Bytes.length);
+                    client.sendFile(request.recipientId(), mp3Bytes, "tts.mp3", null);
+                    yield ScheduledTaskExecutionResult.success("[语音已发送]");
+                }
+                case IMAGE -> {
+                    var images = reply.getImages();
+                    if (images == null || images.isEmpty()) {
+                        yield ScheduledTaskExecutionResult.failure("图片生成结果为空");
+                    }
+                    if (client == null) {
+                        yield ScheduledTaskExecutionResult.failure("iLink client 不可用");
+                    }
+                    for (var img : images) {
+                        log.info("scheduled task dispatching image: name={}, size={}",
+                                img.fileName(), img.bytes().length);
+                        try {
+                            client.sendImage(request.recipientId(), img.bytes(), img.fileName(), null);
+                        } catch (Exception e) {
+                            log.warn("sendImage failed, falling back to sendFile: {}", e.getMessage());
+                            client.sendFile(request.recipientId(), img.bytes(), img.fileName(), null);
+                        }
+                    }
+                    yield ScheduledTaskExecutionResult.success("[图片已发送]");
+                }
+                case MIXED -> {
+                    String text = reply.getTextContent();
+                    if (text != null && !text.isBlank() && client != null) {
+                        client.sendText(request.recipientId(), text);
+                    }
+                    // 发送图片
+                    var images = reply.getImages();
+                    if (images != null && !images.isEmpty() && client != null) {
+                        for (var img : images) {
+                            try {
+                                client.sendImage(request.recipientId(), img.bytes(), img.fileName(), null);
+                            } catch (Exception e) {
+                                client.sendFile(request.recipientId(), img.bytes(), img.fileName(), null);
+                            }
+                        }
+                    }
+                    // 发送文件
+                    var filePayload = reply.getFilePayload();
+                    if (filePayload != null && client != null) {
+                        log.info("scheduled task dispatching file: name={}, size={}",
+                                filePayload.fileName(), filePayload.bytes().length);
+                        client.sendFile(request.recipientId(), filePayload.bytes(), filePayload.fileName(), null);
+                    }
+                    // 发送语音
+                    var audio = reply.getAudioPayload();
+                    if (audio != null && audio.bytes() != null && audio.bytes().length > 0 && client != null) {
+                        AudioConverter converter = audioConverterProvider.getIfAvailable();
+                        if (converter != null) {
+                            byte[] mp3Bytes = converter.wavToMp3(audio.bytes());
+                            client.sendFile(request.recipientId(), mp3Bytes, "tts.mp3", null);
+                        }
+                    }
+                    yield text != null && !text.isBlank()
+                            ? ScheduledTaskExecutionResult.success(text)
+                            : ScheduledTaskExecutionResult.success("计划任务已执行完成。");
+                }
+                case FILE -> {
+                    var filePayload = reply.getFilePayload();
+                    if (filePayload != null && client != null) {
+                        log.info("scheduled task dispatching file: name={}, size={}",
+                                filePayload.fileName(), filePayload.bytes().length);
+                        client.sendFile(request.recipientId(), filePayload.bytes(), filePayload.fileName(), null);
+                    }
+                    yield ScheduledTaskExecutionResult.success("文件已发送。");
+                }
+            };
         };
     }
 

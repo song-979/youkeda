@@ -198,7 +198,8 @@ public class ToolService {
                 "automation", "定时提醒与日程（创建提醒、定时任务、日常安排、闹钟）",
                 "local_files", "本地文件检索、读取和发送",
                 "map_navigation", "高德地图（地点搜索、周边搜索、路线规划、静态地图）",
-                "didi_taxi", "滴滴打车（价格预估、叫车、订单查询、取消订单、司机位置、行程链接）"
+                "didi_taxi", "滴滴打车（价格预估、叫车、订单查询、取消订单、司机位置、行程链接）",
+                "skill", "技能检索（先检索Skill获取执行指南，再调用领域工具）"
         );
 
         private final List<ProjectTool> tools;

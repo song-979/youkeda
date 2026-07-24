@@ -119,6 +119,8 @@ public class AutomationRuntime implements InitializingBean {
                 null);
         store.saveReminder(reminder);
         scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+        log.info("TEXT_REMINDER created successfully: id={}, title={}, remindAt={}",
+                reminder.id(), title, remindAt);
         return ReminderResult.success(reminder, "reminder created");
     }
 
@@ -354,6 +356,9 @@ public class AutomationRuntime implements InitializingBean {
                 maxRetries);
         store.saveReminder(reminder);
         scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+        String kindLabel = taskKind == AutomationStore.AutomationTaskKind.LLM_TASK ? "LLM_TASK" : "TEXT_REMINDER";
+        log.info("{} created successfully: id={}, title={}, remindAt={}",
+                kindLabel, reminder.id(), title, remindAt);
         return ReminderResult.success(reminder,
                 taskKind == AutomationStore.AutomationTaskKind.LLM_TASK ? "llm task created" : "reminder created");
     }
@@ -709,6 +714,29 @@ public class AutomationRuntime implements InitializingBean {
         int retries = effectiveMaxRetries(reminder);
         int attempts = retries + 1;
         String lastError = null;
+
+        // 检查是否有之前执行成功但 context token 缺失导致发送失败的结果
+        String stashedResult = extractStashedResult(reminder);
+        if (stashedResult != null) {
+            store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.PENDING, null, 0));
+            try {
+                dispatcher.send(recipientId, stashedResult);
+                store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.SENT, null, 1));
+                advanceRecurringTaskIfNeeded(reminder);
+                log.info("LLM_TASK {} stashed result sent successfully", reminder.id());
+                return;
+            } catch (Exception e) {
+                if (isContextTokenError(e)) {
+                    store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.PENDING,
+                            "EXECUTED_OK:" + stashedResult, 0));
+                    log.info("LLM_TASK {} resend failed (context token), kept PENDING", reminder.id());
+                } else {
+                    failTriggeredLlmTask(reminder, recipientId, e.getMessage(), 1);
+                }
+                return;
+            }
+        }
+
         for (int i = 1; i <= attempts; i++) {
             try {
                 ScheduledTaskExecutionResult result = scheduledTaskExecutor.execute(new ScheduledTaskExecutionRequest(
@@ -722,10 +750,21 @@ public class AutomationRuntime implements InitializingBean {
                         reminder.recurringTaskId() != null && !reminder.recurringTaskId().isBlank()));
                 if (result != null && result.success()) {
                     String message = normalizeOptional(result.message(), "scheduled task completed");
-                    dispatcher.send(recipientId, message);
-                    store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.SENT, null, i));
-                    advanceRecurringTaskIfNeeded(reminder);
-                    return;
+                    try {
+                        dispatcher.send(recipientId, message);
+                        store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.SENT, null, i));
+                        advanceRecurringTaskIfNeeded(reminder);
+                        return;
+                    } catch (Exception sendEx) {
+                        if (isContextTokenError(sendEx)) {
+                            log.info("LLM_TASK {} executed OK but send failed (context token), result stashed",
+                                    reminder.id());
+                            store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.PENDING,
+                                    "EXECUTED_OK:" + message, 0));
+                            return;
+                        }
+                        throw sendEx;
+                    }
                 }
                 lastError = result != null && result.errorMessage() != null
                         ? result.errorMessage()
@@ -733,9 +772,31 @@ public class AutomationRuntime implements InitializingBean {
             } catch (Exception e) {
                 lastError = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
                 log.warn("scheduled task execution failed: id={}, attempt={}/{}", reminder.id(), i, attempts, e);
+                if (isContextTokenError(e)) {
+                    break;
+                }
             }
         }
-        failTriggeredLlmTask(reminder, recipientId, lastError, attempts);
+
+        if (isContextTokenErrorFromMessage(lastError)) {
+            store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.PENDING,
+                    "waiting for context refresh: " + lastError, 0));
+            log.info("LLM_TASK {} kept PENDING, will retry on next user message", reminder.id());
+        } else {
+            failTriggeredLlmTask(reminder, recipientId, lastError, attempts);
+        }
+    }
+
+    private static String extractStashedResult(AutomationStore.Reminder reminder) {
+        String msg = reminder.failureMessage();
+        if (msg != null && msg.startsWith("EXECUTED_OK:")) {
+            return msg.substring("EXECUTED_OK:".length());
+        }
+        return null;
+    }
+
+    private static boolean isContextTokenErrorFromMessage(String message) {
+        return message != null && (message.contains("context token") || message.contains("contextToken"));
     }
 
     private void failTriggeredLlmTask(AutomationStore.Reminder reminder,
@@ -754,7 +815,7 @@ public class AutomationRuntime implements InitializingBean {
         }
     }
 
-    private static boolean isRetryableError(Exception e) {
+    private static boolean isContextTokenError(Exception e) {
         if (e == null) {
             return false;
         }
