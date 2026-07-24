@@ -8,6 +8,10 @@ import org.apache.pdfbox.pdmodel.PDPage;
 import org.apache.pdfbox.pdmodel.PDResources;
 import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.apache.poi.hwpf.HWPFDocument;
+import org.apache.poi.hwpf.usermodel.Paragraph;
+import org.apache.poi.hwpf.usermodel.Picture;
+import org.apache.poi.hwpf.usermodel.Range;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.apache.poi.xwpf.usermodel.XWPFParagraph;
 import org.apache.poi.xwpf.usermodel.XWPFPictureData;
@@ -206,13 +210,72 @@ public class DocumentService {
 
         private static final Set<String> SUPPORTED_EXTENSIONS = Set.of("docx", "doc");
 
+        /** OLE2 compound document magic bytes: D0 CF 11 E0 A1 B1 1A E1 */
+        private static final byte[] OLE2_MAGIC = {
+                (byte) 0xD0, (byte) 0xCF, (byte) 0x11, (byte) 0xE0,
+                (byte) 0xA1, (byte) 0xB1, (byte) 0x1A, (byte) 0xE1
+        };
+
         @Override
         public Set<String> supportedExtensions() {
             return SUPPORTED_EXTENSIONS;
         }
 
+        private static boolean isOle2Format(byte[] bytes) {
+            if (bytes == null || bytes.length < 8) {
+                return false;
+            }
+            for (int i = 0; i < 8; i++) {
+                if (bytes[i] != OLE2_MAGIC[i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         @Override
         public ParseResult parse(byte[] bytes, String fileName) throws IOException {
+            if (isOle2Format(bytes)) {
+                return parseOldDoc(bytes, fileName);
+            }
+            return parseDocx(bytes, fileName);
+        }
+
+        private ParseResult parseOldDoc(byte[] bytes, String fileName) throws IOException {
+            List<String> paragraphs = new ArrayList<>();
+            List<byte[]> images = new ArrayList<>();
+
+            try (HWPFDocument doc = new HWPFDocument(new ByteArrayInputStream(bytes))) {
+                Range range = doc.getRange();
+                int numParagraphs = range.numParagraphs();
+                for (int i = 0; i < numParagraphs; i++) {
+                    Paragraph para = range.getParagraph(i);
+                    String text = para.text();
+                    if (text != null && !text.isBlank()) {
+                        // HWPF paragraphs may include the \r character at the end
+                        text = text.replace('\r', '\n').replace("\n\n", "\n").trim();
+                        if (!text.isEmpty()) {
+                            paragraphs.add(text);
+                        }
+                    }
+                }
+
+                // Extract embedded pictures from the pictures table
+                List<Picture> pictures = doc.getPicturesTable().getAllPictures();
+                for (Picture pic : pictures) {
+                    byte[] picBytes = pic.getContent();
+                    if (picBytes != null && picBytes.length > 0) {
+                        images.add(picBytes);
+                    }
+                }
+            }
+
+            String text = String.join("\n", paragraphs);
+            log.info("old doc parsed: '{}' -> {} paragraphs, {} images", fileName, paragraphs.size(), images.size());
+            return new ParseResult(text, images, fileName);
+        }
+
+        private ParseResult parseDocx(byte[] bytes, String fileName) throws IOException {
             List<String> paragraphs = new ArrayList<>();
             List<byte[]> images = new ArrayList<>();
 

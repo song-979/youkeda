@@ -1,14 +1,24 @@
 package com.youkeda.project.wechatproject.bot.tool;
 
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ProjectTool;
+import com.youkeda.project.wechatproject.bot.service.DocumentService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import javax.imageio.IIOImage;
+import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.MemoryCacheImageOutputStream;
+import java.awt.Graphics2D;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
@@ -37,6 +47,13 @@ public class LocalFileTools implements ProjectTool {
     private static final Logger log = LoggerFactory.getLogger(LocalFileTools.class);
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
     private static final ThreadLocal<PreparedFile> PREPARED_FILE = new ThreadLocal<>();
+    private static final int MAX_EMBED_IMAGES = 5;
+    private static final long MAX_EMBED_IMAGE_TOTAL_BYTES = 5 * 1024 * 1024L;
+    private static final int MAX_IMAGE_DIMENSION = 1024;
+    private static final float JPEG_QUALITY = 0.75f;
+
+    @Autowired(required = false)
+    private DocumentService documentService;
 
     private boolean enabled = false;
     private List<String> allowedRoots = new ArrayList<>(List.of("."));
@@ -124,7 +141,7 @@ public class LocalFileTools implements ProjectTool {
     }
 
     @Tool(name = "read_local_text_file",
-            description = "读取本地文本文件预览。只允许读取白名单目录内的非敏感文件；二进制文件只返回提示，不会直接展开。")
+            description = "读取本地文件内容。支持 Word(.doc/.docx)、PDF(.pdf)、纯文本(.txt/.md/.json/.csv/.html/.xml/.log) 等格式。对于不支持的格式会自动退回二进制检测。")
     public String readLocalTextFile(
             @ToolParam(description = "要读取的本地文件路径，建议使用 search_local_files 返回的完整路径。") String path,
             @ToolParam(required = false, description = "可选最大读取字节数，默认使用配置值。") Integer maxBytes) {
@@ -137,6 +154,15 @@ public class LocalFileTools implements ProjectTool {
 
         try {
             long size = Files.size(file);
+            String fileName = file.getFileName().toString();
+            String ext = DocumentService.extractExtension(fileName);
+
+            // 尝试用 DocumentService 解析已知文档格式
+            if (documentService != null && documentService.isSupported(ext)) {
+                return readWithDocumentService(file, fileName, ext, size);
+            }
+
+            // 未知格式，走原有的文本/二进制检测逻辑
             int byteLimit = (int) Math.min(Math.max(1, maxBytes != null ? maxBytes : maxReadBytes), maxReadBytes);
             byte[] bytes = readPrefix(file, byteLimit);
 
@@ -164,6 +190,108 @@ public class LocalFileTools implements ProjectTool {
             log.error("read_local_text_file failed for path={}", file, e);
             return "读取本地文件失败：" + e.getMessage();
         }
+    }
+
+    private String readWithDocumentService(Path file, String fileName, String ext, long size) throws IOException {
+        long parseLimit = Math.min(size, maxSendFileBytes);
+        if (size > parseLimit) {
+            return "文件过大（" + humanSize(size) + "），当前读取上限为 " + humanSize(maxSendFileBytes) + "。";
+        }
+
+        byte[] bytes = Files.readAllBytes(file);
+        DocumentService.ParseResult result = documentService.parse(bytes, fileName);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("文件：").append(file).append("\n");
+        sb.append("格式：").append(ext.toUpperCase()).append("\n");
+        sb.append("大小：").append(humanSize(size)).append("\n");
+        sb.append("修改时间：").append(formatModifiedTime(file)).append("\n");
+
+        String text = result.text();
+        if (text == null || text.isBlank()) {
+            sb.append("\n文件内容为空或无法提取文字。");
+        } else {
+            sb.append("\n内容：\n\n").append(text);
+        }
+
+        List<byte[]> images = result.images();
+        if (images != null && !images.isEmpty()) {
+            sb.append("\n\n---\n");
+            sb.append("文档中提取到 ").append(images.size()).append(" 张嵌入图片：\n");
+
+            long totalBytes = 0;
+            int embedCount = 0;
+            for (int i = 0; i < images.size(); i++) {
+                byte[] raw = images.get(i);
+                if (raw == null || raw.length == 0) {
+                    continue;
+                }
+                if (embedCount >= MAX_EMBED_IMAGES || totalBytes > MAX_EMBED_IMAGE_TOTAL_BYTES) {
+                    sb.append("\n（还有 ").append(images.size() - embedCount)
+                            .append(" 张图片因数量/大小限制未展开，已到达上限）");
+                    break;
+                }
+                totalBytes += raw.length;
+                try {
+                    byte[] compressed = compressImageForEmbed(raw);
+                    String dataUri = "data:image/jpeg;base64,"
+                            + java.util.Base64.getEncoder().encodeToString(compressed);
+                    sb.append("\n图片 ").append(i + 1).append("：\n").append(dataUri).append("\n");
+                    embedCount++;
+                } catch (Exception e) {
+                    log.warn("failed to compress image {} from '{}'", i + 1, fileName, e);
+                    sb.append("\n图片 ").append(i + 1).append("：（压缩失败，已跳过）");
+                }
+            }
+        }
+
+        return sb.toString().trim();
+    }
+
+    private static byte[] compressImageForEmbed(byte[] raw) throws IOException {
+        BufferedImage src = ImageIO.read(new java.io.ByteArrayInputStream(raw));
+        if (src == null) {
+            return raw;
+        }
+
+        BufferedImage scaled = resizeIfNeeded(src);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        var writers = ImageIO.getImageWritersByFormatName("jpeg");
+        if (!writers.hasNext()) {
+            ImageIO.write(scaled, "jpg", out);
+            return out.toByteArray();
+        }
+        ImageWriter writer = writers.next();
+        try {
+            ImageWriteParam param = writer.getDefaultWriteParam();
+            param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+            param.setCompressionQuality(JPEG_QUALITY);
+            writer.setOutput(new MemoryCacheImageOutputStream(out));
+            writer.write(null, new IIOImage(scaled, null, null), param);
+        } finally {
+            writer.dispose();
+        }
+        return out.toByteArray();
+    }
+
+    private static BufferedImage resizeIfNeeded(BufferedImage src) {
+        int w = src.getWidth();
+        int h = src.getHeight();
+        int max = Math.max(w, h);
+        if (max <= MAX_IMAGE_DIMENSION) {
+            return src;
+        }
+        double ratio = (double) MAX_IMAGE_DIMENSION / max;
+        int newW = Math.max(1, (int) (w * ratio));
+        int newH = Math.max(1, (int) (h * ratio));
+        BufferedImage scaled = new BufferedImage(newW, newH, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = scaled.createGraphics();
+        try {
+            g.drawImage(src.getScaledInstance(newW, newH, java.awt.Image.SCALE_SMOOTH), 0, 0, null);
+        } finally {
+            g.dispose();
+        }
+        return scaled;
     }
 
     @Tool(name = "send_local_file",

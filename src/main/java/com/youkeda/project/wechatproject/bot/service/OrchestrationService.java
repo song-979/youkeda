@@ -329,12 +329,6 @@ public final class OrchestrationService {
             if (agents.containsKey("SPEECH_GEN") && voiceCatalog != null) {
                 sb.append(voiceCatalog.generateVoicePrompt());
             }
-            sb.append("\nPrefer apply_automation_plan with structured JSON. ");
-            sb.append("Use kind=TEXT_REMINDER only for simple text reminders such as drinking water or taking medicine. ");
-            sb.append("Use kind=LLM_TASK for delayed actions that must execute tools at trigger time, such as weather lookup, web search, file generation, or speech generation. ");
-            sb.append("For LLM_TASK, save instruction as a present-time action to run later, for example: 'Query today's weather in Hangzhou Yuhang now and tell the user.' ");
-            sb.append("Do not query weather or other real-time data during creation. Do not simulate future results. ");
-            sb.append("For UPDATE, include targetId and update the existing task; never create a replacement task when the user asks to modify one.");
             return sb.toString();
         }
 
@@ -419,22 +413,30 @@ public final class OrchestrationService {
         private final AgentProperties agentProperties;
         private final ChatClient toolChatClient;
         private final String toolCategories;
+        private final String skillsSummary;
 
         public ChatAgent(AiModelClient chatClient) {
-            this(chatClient, null, null, "");
+            this(chatClient, null, null, "", "");
         }
 
         public ChatAgent(AiModelClient chatClient, AgentProperties agentProperties,
                          ToolChatClientFactory toolChatClientFactory) {
-            this(chatClient, agentProperties, toolChatClientFactory, "");
+            this(chatClient, agentProperties, toolChatClientFactory, "", "");
         }
 
         public ChatAgent(AiModelClient chatClient, AgentProperties agentProperties,
                          ToolChatClientFactory toolChatClientFactory, String toolCategories) {
+            this(chatClient, agentProperties, toolChatClientFactory, toolCategories, "");
+        }
+
+        public ChatAgent(AiModelClient chatClient, AgentProperties agentProperties,
+                         ToolChatClientFactory toolChatClientFactory, String toolCategories,
+                         String skillsSummary) {
             this.chatClient = chatClient;
             this.agentProperties = agentProperties;
             this.toolChatClient = toolChatClientFactory != null ? toolChatClientFactory.create() : null;
             this.toolCategories = toolCategories != null ? toolCategories : "";
+            this.skillsSummary = skillsSummary != null ? skillsSummary : "";
         }
 
         @Override
@@ -481,7 +483,6 @@ public final class OrchestrationService {
         @Override
         public AgentResult execute(AgentTask task) throws IOException {
             log.info("ChatAgent executing task: instruction={}", task.instruction());
-            LocalFileTools.getAndClearPreparedFile();
 
             List<String> imageUrls = stringList(task.parameters().get("imageUrls"));
             List<ChatRequest.Message> history = historyList(task.parameters().get("history"));
@@ -527,7 +528,12 @@ public final class OrchestrationService {
             List<Message> messages = new ArrayList<>();
             String systemPrompt = agentProperties != null ? agentProperties.getSystemPrompt() : null;
             if (systemPrompt != null && !systemPrompt.isBlank()) {
-                messages.add(new SystemMessage(systemPrompt + "\n\n" + toolUseDisciplinePrompt()));
+                if (!skillsSummary.isEmpty()) {
+                    systemPrompt = systemPrompt + "\n" + skillsSummary;
+                }
+                messages.add(new SystemMessage(systemPrompt));
+            } else if (!skillsSummary.isEmpty()) {
+                messages.add(new SystemMessage(skillsSummary));
             }
             if (history != null && !history.isEmpty()) {
                 for (ChatRequest.Message historyMessage : history) {
@@ -579,19 +585,6 @@ public final class OrchestrationService {
 
         private static String contentAsText(Object content) {
             return content == null ? null : content instanceof String text ? text : String.valueOf(content);
-        }
-
-        private static String toolUseDisciplinePrompt() {
-            return """
-                    [Tool execution discipline]
-                    - When the task asks to create reminders, schedules, alarms, delayed lookups, or recurring tasks, call automation tools; do not only say it has been set.
-                    - Prefer apply_automation_plan with structured JSON for automation creation and updates.
-                    - Use kind=TEXT_REMINDER only for simple fixed-text reminders.
-                    - Use kind=LLM_TASK for delayed actions that need fresh tool execution at trigger time, such as weather lookup, web search, file generation, or speech generation.
-                    - For LLM_TASK, save a present-time instruction to execute later. Do not query real-time data during creation and do not simulate future results.
-                    - For UPDATE, include targetId and update the existing task; never create a replacement task when the user asks to modify one.
-                    - Do not output [FILE:...] or [LOCAL_FILE:...] unless the user explicitly asks to generate or send a file.
-                    """;
         }
 
         private static List<String> stringList(Object value) {
@@ -968,6 +961,16 @@ public final class OrchestrationService {
                 - The system DOES support reminders — do NOT say it doesn't. Route to CHAT and let CHAT handle it.
                 - Do NOT return completed for these queries — CHAT must handle them via its internal tool loop.
 
+                CRITICAL — TEXT_REMINDER vs LLM_TASK (you must understand this before writing CHAT instructions):
+                CHAT supports TWO kinds of scheduled tasks. Your CHAT instruction determines which one CHAT will create.
+                - TEXT_REMINDER: A fixed text message stored at creation time. When the time arrives, the stored text is sent verbatim. Use only for static reminders like "该吃药了", "记得带伞", "去开会".
+                - LLM_TASK: An AI execution task that RUNS AT THE TRIGGER TIME. At the scheduled time, the AI wakes up, executes the instruction (query weather, search news, generate content, etc.) with fresh real-time data, and sends the result.
+                Key distinction: If the task content depends on real-time data (weather, news, stock prices, search results, AI-generated content), it MUST be LLM_TASK. TEXT_REMINDER would send stale pre-recorded data.
+                When writing CHAT instructions for time-based tasks, you MUST tell CHAT which kind to use:
+                  * Static content ("X分钟后提醒我XX", "明天X点提醒我吃药") → tell CHAT: "创建一个TEXT_REMINDER，message=固定文字"
+                  * Dynamic content ("X点帮我查天气", "明天X点搜新闻", "X点帮我生成XX") → tell CHAT: "创建一个LLM_TASK定时任务，到期时执行：查询天气/搜索新闻/生成内容。不要现在查询，让定时任务在触发时实时查询。"
+                ⚠️ NEVER tell CHAT to "query now and put the result in the reminder text" for weather/search/news tasks. This produces stale data. Tell CHAT to create an LLM_TASK instead.
+
                 DiDi Taxi / Ride-hailing routing rules (CRITICAL):
                 - When the user asks to hail a taxi, call a car, or request a ride, you MUST route to CHAT. CHAT has internal DiDi tools (didi_taxi_estimate, didi_taxi_create_order, etc.).
                 - CRITICAL: The DiDi taxi flow requires user confirmation on car type before creating an order. Your plan MUST only route ONE task to CHAT — CHAT will handle price estimation internally and present car options to the user. Do NOT plan a create_order task; the order happens in a separate conversation turn after the user explicitly selects a car type.
@@ -1099,7 +1102,6 @@ public final class OrchestrationService {
             }
 
             StringBuilder userContent = new StringBuilder();
-            userContent.append("Current application datetime: ").append(currentApplicationDateTime()).append("\n");
             userContent.append(request.text() != null ? request.text() : "");
             if (!request.imageBase64Urls().isEmpty()) {
                 userContent.append("\n[user attached images: ").append(request.imageBase64Urls().size()).append("]");
@@ -1125,7 +1127,6 @@ public final class OrchestrationService {
 
         private OrchestrationResult doReflect(TaskScratchpad scratchpad, UserRequest originalRequest) {
             StringBuilder reflectContent = new StringBuilder();
-            reflectContent.append("Current application datetime: ").append(currentApplicationDateTime()).append("\n\n");
             reflectContent.append("=== ORIGINAL USER REQUEST ===\n");
             reflectContent.append(originalRequest.text() != null ? originalRequest.text() : "");
             if (!originalRequest.imageBase64Urls().isEmpty()) {
@@ -1171,10 +1172,6 @@ public final class OrchestrationService {
 
             log.debug("orchestrator raw response: {}", content);
             return content;
-        }
-
-        private static String currentApplicationDateTime() {
-            return DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(ZonedDateTime.now(ZoneId.systemDefault()));
         }
 
         @SuppressWarnings("unchecked")
@@ -1390,7 +1387,6 @@ public final class OrchestrationService {
             lock.lock();
             DiDiTaxiTools.setCurrentUser(userId);
             try {
-            LocalFileTools.getAndClearPreparedFile();
             List<ChatRequest.Message> history = memory != null ? memory.getHistory(userId) : List.of();
             ImageMemory imageMemory = imageBase64Urls.isEmpty()
                     ? resolveImageMemory(userId)
@@ -1566,15 +1562,6 @@ public final class OrchestrationService {
                         .build();
             }
 
-            if (registry.contains("CHAT") && isReminderAutomationRequest(text)) {
-                return OrchestrationResult.builder()
-                        .status(OrchestrationResult.Status.EXECUTE)
-                        .reasoning("reminder automation request routed to CHAT tools")
-                        .tasks(List.of(new AgentTask("CHAT", automationPlanInstruction(text),
-                                Map.of("flow", "reminder-automation"))))
-                        .build();
-            }
-
             if (registry.contains("SPEECH_GEN") && isComfortStoryRequest(text)) {
                 String gentleVoice = voiceCatalog.findByMood("comforting")
                         .map(VoiceProfile::voiceId)
@@ -1631,89 +1618,6 @@ public final class OrchestrationService {
             }
 
             return null;
-        }
-
-        private static boolean isReminderAutomationRequest(String text) {
-            if (text == null || text.isBlank()) {
-                return false;
-            }
-            String normalized = text.toLowerCase(Locale.ROOT);
-            boolean asksReminderAction = containsAny(normalized,
-                    "提醒我",
-                    "提醒一下",
-                    "发一条消息",
-                    "发消息",
-                    "给我发",
-                    "告诉我",
-                    "告知我",
-                    "告知",
-                    "通知我",
-                    "叫我",
-                    "定时",
-                    "闹钟");
-            if (!asksReminderAction) {
-                return false;
-            }
-            return containsAny(normalized,
-                    "今天",
-                    "明天",
-                    "后天",
-                    "上午",
-                    "下午",
-                    "中午",
-                    "晚上",
-                    "早上",
-                    "凌晨",
-                    "每天",
-                    "每周",
-                    "每月",
-                    "每隔",
-                    "分钟",
-                    "小时")
-                    || Pattern.compile("\\d{1,2}[:：]\\d{2}").matcher(normalized).find()
-                    || Pattern.compile("\\d{1,2}\\s*点").matcher(normalized).find();
-        }
-
-        private static String reminderAutomationInstruction(String userText) {
-            String now = DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(
-                    ZonedDateTime.now(ZoneId.systemDefault()));
-            boolean weather = userText != null && userText.contains("天气");
-            StringBuilder sb = new StringBuilder();
-            sb.append("当前应用时间是 ").append(now).append("。请处理用户的定时/提醒请求：\n");
-            sb.append(userText != null ? userText : "").append("\n\n");
-            sb.append("必须调用自动化工具创建真实提醒，不要只文字承诺，不要模拟未来执行结果，不要生成文件。");
-            sb.append("如果用户使用相对日期或未写年份，按当前应用时间推断未来最近的合理时间，并传入 ISO datetime with timezone。");
-            if (weather) {
-                sb.append("这是定时查询天气需求，必须优先调用 create_weather_reminder；")
-                        .append("如果是周期天气需求，调用 create_recurring_weather_reminder。")
-                        .append("location 使用用户指定地点，weatherMode 按用户语义选择 CURRENT 或 FORECAST。");
-            }
-            return sb.toString();
-        }
-
-        private static String automationPlanInstruction(String userText) {
-            String now = DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(
-                    ZonedDateTime.now(ZoneId.systemDefault()));
-            StringBuilder sb = new StringBuilder();
-            sb.append("Current application datetime: ").append(now).append("\n");
-            sb.append("Handle this user automation request by calling apply_automation_plan with structured JSON.\n\n");
-            sb.append("User request:\n");
-            sb.append(userText != null ? userText : "").append("\n\n");
-            sb.append("Choose kind as follows:\n");
-            sb.append("- TEXT_REMINDER: simple fixed text reminder, for example remind me to drink water or take medicine.\n");
-            sb.append("- LLM_TASK: delayed action that must execute the user's demand at trigger time, for example query weather, search the web, generate speech, generate files, or combine multiple tools.\n\n");
-            sb.append("Rules:\n");
-            sb.append("- Always call apply_automation_plan; do not only promise that it is set.\n");
-            sb.append("- Convert relative or missing dates to a future ISO datetime with timezone using the current application datetime.\n");
-            sb.append("- For LLM_TASK, save instruction as a present-time action to run later, such as: Query today's weather in Hangzhou Yuhang now and tell the user.\n");
-            sb.append("- Do not query weather, web, or other real-time data during creation; the LLM_TASK will do that at trigger time.\n");
-            sb.append("- Do not simulate future results.\n");
-            sb.append("- For UPDATE, include targetId and update the existing task. If the target is unclear, list candidates or ask for clarification; never create a replacement task.\n");
-            sb.append("- expectedToolCategories is only for audit/debugging and must not restrict future model tool calls.\n\n");
-            sb.append("Plan JSON examples:\n");
-            sb.append("{\"operation\":\"CREATE\",\"kind\":\"TEXT_REMINDER\",\"title\":\"drink water\",\"runAt\":\"2026-07-24T09:00:00+08:00\",\"message\":\"Drink water.\"}\n");
-            sb.append("{\"operation\":\"CREATE\",\"kind\":\"LLM_TASK\",\"title\":\"Yuhang weather\",\"runAt\":\"2026-07-24T09:00:00+08:00\",\"instruction\":\"Query today's weather in Hangzhou Yuhang now and tell the user.\",\"originalRequest\":\"Tell me Yuhang weather at 9 AM.\",\"expectedToolCategories\":[\"information\"]}\n");
-            return sb.toString();
         }
 
         private static String scheduledTaskPrompt(ScheduledTaskExecutionRequest request) {
