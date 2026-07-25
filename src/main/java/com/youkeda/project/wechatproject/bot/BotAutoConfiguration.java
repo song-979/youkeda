@@ -1,8 +1,14 @@
 package com.youkeda.project.wechatproject.bot;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
+import com.github.wechat.ilink.sdk.core.context.ConversationContext;
+import com.github.wechat.ilink.sdk.core.context.ContextKey;
+import com.github.wechat.ilink.sdk.core.context.ResumeContext;
 import com.github.wechat.ilink.sdk.core.listener.OnLoginListener;
+import com.github.wechat.ilink.sdk.core.login.LoginContext;
 import com.youkeda.project.wechatproject.bot.handler.MessageHandler;
 import com.youkeda.project.wechatproject.bot.tool.AutomationRuntime;
 import com.youkeda.project.wechatproject.bot.tool.SkillTools;
@@ -11,6 +17,8 @@ import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.DashScopeImageGenClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.ImageGenClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.OpenAiCompatibleClient;
+import com.youkeda.project.wechatproject.bot.service.AiService.OpenAiImageGenClient;
+import com.youkeda.project.wechatproject.bot.service.BotService.ContextPersister;
 import com.youkeda.project.wechatproject.bot.service.BotService.IlinkClientLifecycle;
 import com.youkeda.project.wechatproject.bot.service.BotService.IlinkProperties;
 import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
@@ -81,6 +89,9 @@ public class BotAutoConfiguration {
         return new MessageBridge();
     }
 
+    private static final String RESUME_CONTEXT_PATH = "data/ilink-resume/resume-context.json";
+    private static final ObjectMapper RESUME_MAPPER = new ObjectMapper();
+
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "ilink", name = "enabled", havingValue = "true", matchIfMissing = true)
@@ -94,6 +105,12 @@ public class BotAutoConfiguration {
                 .heartbeatEnabled(props.isHeartbeatEnabled())
                 .heartbeatIntervalMs(props.getHeartbeatIntervalMs())
                 .build();
+
+        ResumeContext resumeContext = loadResumeContext();
+        if (resumeContext != null) {
+            log.info("resume context loaded: {} conversation contexts",
+                    resumeContext.getConversationContextMap().size());
+        }
 
         return ILinkClient.builder()
                 .config(config)
@@ -109,6 +126,7 @@ public class BotAutoConfiguration {
                         log.error("iLink login failed", ex);
                     }
                 })
+                .resumeContext(resumeContext)
                 .build();
     }
 
@@ -118,7 +136,139 @@ public class BotAutoConfiguration {
     public IlinkClientLifecycle ilinkClientLifecycle(ILinkClient ilinkClient,
                                                      MessageBridge messageBridge,
                                                      IlinkProperties props) {
-        return new IlinkClientLifecycle(ilinkClient, messageBridge, props);
+        return new IlinkClientLifecycle(ilinkClient, messageBridge, props, this::saveResumeContext);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "ilink", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public ContextPersister contextPersister(ILinkClient ilinkClient,
+                                             MessageBridge messageBridge) {
+        return new ContextPersister(ilinkClient, messageBridge, this::saveResumeContext);
+    }
+
+    private ResumeContext loadResumeContext() {
+        java.nio.file.Path path = java.nio.file.Path.of(RESUME_CONTEXT_PATH);
+        if (!java.nio.file.Files.exists(path)) {
+            log.info("no resume context file at {}", RESUME_CONTEXT_PATH);
+            return null;
+        }
+        try {
+            String content = java.nio.file.Files.readString(path);
+            JsonNode root = RESUME_MAPPER.readTree(content);
+
+            JsonNode lc = root.get("loginContext");
+            if (lc == null) {
+                log.warn("resume context file missing loginContext field");
+                return null;
+            }
+            LoginContext loginContext = new LoginContext(
+                    lc.get("botToken").asText(),
+                    lc.get("userId").asText(),
+                    lc.get("botId").asText(),
+                    lc.get("baseUrl").asText());
+
+            String updatesCursor = root.has("updatesCursor") ? root.get("updatesCursor").asText() : null;
+
+            String currentBotId = loginContext.getBotId();
+            java.util.Map<String, ConversationContext> contexts = new java.util.LinkedHashMap<>();
+            JsonNode cc = root.get("conversationContexts");
+            int skipped = 0;
+            if (cc != null && cc.isObject()) {
+                var fields = cc.fields();
+                while (fields.hasNext()) {
+                    var entry = fields.next();
+                    String userId = entry.getKey();
+                    JsonNode ctxNode = entry.getValue();
+                    String botId = ctxNode.get("botId").asText();
+                    if (!currentBotId.equals(botId)) {
+                        log.info("skipping conversation context for userId={}, botId={} != current botId={}",
+                                userId, botId, currentBotId);
+                        skipped++;
+                        continue;
+                    }
+                    ConversationContext ctx = new ConversationContext(new ContextKey(botId, userId));
+                    if (ctxNode.has("latestContextToken") && !ctxNode.get("latestContextToken").isNull()) {
+                        ctx.setLatestContextToken(ctxNode.get("latestContextToken").asText());
+                    }
+                    if (ctxNode.has("sourceMessageId") && !ctxNode.get("sourceMessageId").isNull()) {
+                        ctx.updateContextToken(
+                                ctx.getLatestContextToken(),
+                                ctxNode.get("sourceMessageId").asLong(),
+                                ctxNode.has("sourceMessageTime") && !ctxNode.get("sourceMessageTime").isNull()
+                                        ? ctxNode.get("sourceMessageTime").asLong() : null);
+                    }
+                    contexts.put(userId, ctx);
+                }
+            }
+            if (skipped > 0) {
+                log.warn("skipped {} conversation contexts due to botId mismatch (current bot: {})",
+                        skipped, currentBotId);
+            }
+
+            ResumeContext result = ResumeContext.builder(loginContext)
+                    .updatesCursor(updatesCursor)
+                    .conversationContexts(contexts)
+                    .build();
+            log.info("resume context loaded: {} conversations, cursor={}",
+                    contexts.size(), updatesCursor != null ? "present" : "absent");
+            return result;
+
+        } catch (Exception e) {
+            log.warn("failed to load resume context from {}: {}", RESUME_CONTEXT_PATH, e.getMessage());
+            return null;
+        }
+    }
+
+    private void saveResumeContext(ResumeContext resumeContext) {
+        if (resumeContext == null) {
+            return;
+        }
+        try {
+            var root = RESUME_MAPPER.createObjectNode();
+
+            LoginContext lc = resumeContext.getLoginContext();
+            var lcNode = RESUME_MAPPER.createObjectNode();
+            lcNode.put("botToken", lc.getBotToken());
+            lcNode.put("userId", lc.getUserId());
+            lcNode.put("botId", lc.getBotId());
+            lcNode.put("baseUrl", lc.getBaseUrl());
+            root.set("loginContext", lcNode);
+
+            if (resumeContext.getUpdatesCursor() != null) {
+                root.put("updatesCursor", resumeContext.getUpdatesCursor());
+            }
+
+            var ccNode = RESUME_MAPPER.createObjectNode();
+            for (var entry : resumeContext.getConversationContextMap().entrySet()) {
+                var ctx = entry.getValue();
+                if (ctx == null || ctx.getLatestContextToken() == null) {
+                    continue;
+                }
+                var ctxNode = RESUME_MAPPER.createObjectNode();
+                ctxNode.put("botId", ctx.getKey().getBotId());
+                ctxNode.put("userId", ctx.getKey().getUserId());
+                ctxNode.put("latestContextToken", ctx.getLatestContextToken());
+                if (ctx.getSourceMessageId() != null) {
+                    ctxNode.put("sourceMessageId", ctx.getSourceMessageId());
+                }
+                if (ctx.getSourceMessageTime() != null) {
+                    ctxNode.put("sourceMessageTime", ctx.getSourceMessageTime());
+                }
+                ccNode.set(entry.getKey(), ctxNode);
+            }
+            root.set("conversationContexts", ccNode);
+
+            java.nio.file.Path dir = java.nio.file.Path.of(RESUME_CONTEXT_PATH).getParent();
+            java.nio.file.Files.createDirectories(dir);
+            java.nio.file.Files.writeString(
+                    java.nio.file.Path.of(RESUME_CONTEXT_PATH),
+                    RESUME_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(root));
+            log.info("resume context saved to {}", RESUME_CONTEXT_PATH);
+
+        } catch (Exception e) {
+            log.error("failed to save resume context: {}", e.getMessage(), e);
+        }
     }
 
     @Bean
@@ -133,9 +283,9 @@ public class BotAutoConfiguration {
     @ConditionalOnMissingBean
     @ConditionalOnExpression("${agent.ai.enabled:true} && ${agent.ai.image-gen-enabled:false}")
     public ImageGenClient imageGenClient(AgentProperties props) {
-        log.info("creating DashScopeImageGenClient for model={}, url={}",
+        log.info("creating OpenAiImageGenClient for model={}, url={}",
                 props.getImageGenModel(), props.getImageGenApiUrl());
-        return new DashScopeImageGenClient(props);
+        return new OpenAiImageGenClient(props);
     }
 
     @Bean

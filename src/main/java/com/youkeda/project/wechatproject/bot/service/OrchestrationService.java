@@ -986,7 +986,7 @@ public final class OrchestrationService {
                   [/FILE]
                 - Example CHAT instruction for file generation: "请根据对话历史总结今天的内容，生成一个Markdown文档。你必须使用 [FILE:对话总结.md] 和 [/FILE] 标记包裹文件内容，[/FILE] 之后可附加简短说明。"
                 - After the [/FILE] marker, the CHAT agent may include an optional plain-text response (e.g. "文件已生成"). This text will be sent alongside the file.
-                - Supported file extensions: txt, md, json, csv, html, xml, log, docx. Choose the extension based on what the user asked for (e.g. .md for markdown documents, .docx for Word documents, .csv for tabular data, .json for structured data).
+                - Supported file extensions: txt, md, json, csv, html, xml, log, docx. Choose the extension based on what the user asked for (e.g. .md for markdown documents, .docx for Word documents, .csv for tabular data, .json for structured data). IMPORTANT: Always use .docx for Word documents, never .doc.
                 - The filename should be descriptive and match the user's request (e.g. 周报.md, 数据分析报告.docx, 用户列表.csv).
 
                 Input format — the user message may contain source annotations:
@@ -1803,8 +1803,8 @@ public final class OrchestrationService {
                 ParsedFileResult parsed = extractFileMarkers(textReply);
                 if (parsed != null) {
                     textReply = parsed.remainderText();
-                    byte[] fileBytes = documentService.generate(parsed.fileContent(), parsed.fileName());
-                    filePayload = new ModelReply.FilePayload(fileBytes, parsed.fileName());
+                    DocumentService.GeneratedFile genFile = documentService.generate(parsed.fileContent(), parsed.fileName());
+                    filePayload = new ModelReply.FilePayload(genFile.bytes(), genFile.fileName());
                 }
             }
 
