@@ -88,12 +88,17 @@ public class DocumentService {
         return parser.parse(bytes, fileName);
     }
 
-    public byte[] generate(String content, String fileName) {
+    public record GeneratedFile(byte[] bytes, String fileName) {}
+
+    public GeneratedFile generate(String content, String fileName) {
         String ext = extension(fileName);
-        return switch (ext) {
-            case "docx" -> generateDocx(content);
-            default -> content.getBytes(StandardCharsets.UTF_8);
-        };
+        if ("docx".equals(ext) || "doc".equals(ext)) {
+            String correctedName = "doc".equals(ext)
+                    ? fileName.substring(0, fileName.lastIndexOf('.')) + ".docx"
+                    : fileName;
+            return new GeneratedFile(generateDocx(content), correctedName);
+        }
+        return new GeneratedFile(content.getBytes(StandardCharsets.UTF_8), fileName);
     }
 
     public static String extractExtension(String fileName) {
