@@ -1,6 +1,7 @@
 package com.youkeda.project.wechatproject.bot.service;
 
 import com.github.wechat.ilink.sdk.ILinkClient;
+import com.github.wechat.ilink.sdk.core.context.ResumeContext;
 import com.github.wechat.ilink.sdk.core.listener.OnMessageListener;
 import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
 import org.slf4j.Logger;
@@ -12,6 +13,7 @@ import org.springframework.context.event.EventListener;
 
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Consumer;
 
 /**
  * WeChat iLink service namespace for connection properties, lifecycle, and message fan-out.
@@ -107,6 +109,49 @@ public final class BotService {
         }
     }
 
+    /**
+     * Saves resume context after every incoming message and on shutdown.
+     * Keeps data/ilink-resume/resume-context.json always up to date.
+     */
+    public static class ContextPersister implements OnMessageListener, DisposableBean {
+
+        private static final Logger log = LoggerFactory.getLogger(ContextPersister.class);
+
+        private final ILinkClient ilinkClient;
+        private final Consumer<ResumeContext> saver;
+
+        public ContextPersister(ILinkClient ilinkClient, MessageBridge messageBridge,
+                                Consumer<ResumeContext> saver) {
+            this.ilinkClient = ilinkClient;
+            this.saver = saver;
+            messageBridge.addListener(this);
+            log.info("context persister registered to message bridge");
+        }
+
+        @Override
+        public void onMessages(List<WeixinMessage> messages) {
+            if (messages == null || messages.isEmpty()) {
+                return;
+            }
+            try {
+                ResumeContext ctx = ilinkClient.exportResumeContext();
+                saver.accept(ctx);
+            } catch (Exception e) {
+                log.warn("failed to persist resume context on message: {}", e.getMessage());
+            }
+        }
+
+        @Override
+        public void destroy() {
+            try {
+                ResumeContext ctx = ilinkClient.exportResumeContext();
+                saver.accept(ctx);
+            } catch (Exception e) {
+                log.warn("failed to persist resume context on destroy: {}", e.getMessage());
+            }
+        }
+    }
+
     public static class IlinkClientLifecycle implements DisposableBean {
 
         private static final Logger log = LoggerFactory.getLogger(IlinkClientLifecycle.class);
@@ -114,12 +159,20 @@ public final class BotService {
         private final ILinkClient ilinkClient;
         private final MessageBridge messageBridge;
         private final IlinkProperties props;
+        private final java.util.function.Consumer<ResumeContext> resumeContextSaver;
 
         public IlinkClientLifecycle(ILinkClient ilinkClient, MessageBridge messageBridge,
                                     IlinkProperties props) {
+            this(ilinkClient, messageBridge, props, null);
+        }
+
+        public IlinkClientLifecycle(ILinkClient ilinkClient, MessageBridge messageBridge,
+                                    IlinkProperties props,
+                                    java.util.function.Consumer<ResumeContext> resumeContextSaver) {
             this.ilinkClient = ilinkClient;
             this.messageBridge = messageBridge;
             this.props = props;
+            this.resumeContextSaver = resumeContextSaver;
         }
 
         @EventListener(ApplicationReadyEvent.class)
@@ -145,6 +198,14 @@ public final class BotService {
 
         @Override
         public void destroy() {
+            if (resumeContextSaver != null) {
+                try {
+                    ResumeContext ctx = ilinkClient.exportResumeContext();
+                    resumeContextSaver.accept(ctx);
+                } catch (Exception e) {
+                    log.error("failed to export resume context", e);
+                }
+            }
             ilinkClient.close();
         }
     }

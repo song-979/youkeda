@@ -518,6 +518,110 @@ public final class AiService {
         }
     }
 
+    /**
+     * OpenAI-compatible image generation client (synchronous, /v1/images/generations).
+     * Supports models like gpt-image-2, gpt-image2-1k that return b64_json or url.
+     */
+    public static class OpenAiImageGenClient implements ImageGenClient {
+
+        private static final Logger log = LoggerFactory.getLogger(OpenAiImageGenClient.class);
+        private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+        private final String apiUrl;
+        private final String apiKey;
+        private final String model;
+        private final String size;
+        private final int n;
+        private final RestTemplate restTemplate;
+
+        public OpenAiImageGenClient(AgentProperties props) {
+            this.apiUrl = props.getImageGenApiUrl() != null && !props.getImageGenApiUrl().isEmpty()
+                    ? props.getImageGenApiUrl()
+                    : props.getApiUrl() + "/v1/images/generations";
+            this.apiKey = props.getImageGenApiKey() != null && !props.getImageGenApiKey().isEmpty()
+                    ? props.getImageGenApiKey() : props.getApiKey();
+            this.model = props.getImageGenModel();
+            this.size = props.getImageGenSize();
+            this.n = props.getImageGenN();
+            this.restTemplate = createRestTemplate(props);
+        }
+
+        private static RestTemplate createRestTemplate(AgentProperties props) {
+            SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+            factory.setConnectTimeout(props.getConnectTimeoutMs());
+            factory.setReadTimeout(180_000);
+            return new RestTemplate(factory);
+        }
+
+        @Override
+        public byte[] generate(String prompt) throws IOException {
+            Map<String, Object> body = buildRequestBody(prompt);
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(apiKey);
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+
+            try {
+                ResponseEntity<String> response = restTemplate.postForEntity(apiUrl, entity, String.class);
+                String raw = response.getBody();
+                if (raw == null || raw.isEmpty()) {
+                    throw new IOException("empty response from image generation API");
+                }
+
+                JsonNode root = OBJECT_MAPPER.readTree(raw);
+                JsonNode data = root.path("data");
+                if (!data.isArray() || data.size() == 0) {
+                    throw new IOException("image response has no data array");
+                }
+
+                JsonNode first = data.get(0);
+
+                // prefer b64_json
+                String b64 = textOrNull(first.path("b64_json"));
+                if (b64 != null) {
+                    log.info("image gen success (b64_json): model={}, size={}, bytes={}",
+                            model, textOrNull(first.path("size")), b64.length());
+                    return Base64.getDecoder().decode(b64);
+                }
+
+                // fallback: download from url
+                String imageUrl = textOrNull(first.path("url"));
+                if (imageUrl != null) {
+                    log.info("image gen success (url): model={}, url={}", model, imageUrl);
+                    try (InputStream in = URI.create(imageUrl).toURL().openStream()) {
+                        return in.readAllBytes();
+                    }
+                }
+
+                throw new IOException("image response contains neither b64_json nor url");
+
+            } catch (RestClientException e) {
+                log.error("image gen API call failed: url={}, model={}, error={}", apiUrl, model, e.getMessage());
+                throw new IOException("Image generation failed: " + e.getMessage(), e);
+            }
+        }
+
+        private Map<String, Object> buildRequestBody(String prompt) {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("model", model);
+            body.put("prompt", prompt);
+            body.put("n", n);
+            body.put("size", size);
+            body.put("response_format", "b64_json");
+            return body;
+        }
+
+        private static String textOrNull(JsonNode node) {
+            if (node == null || !node.isTextual()) {
+                return null;
+            }
+            String text = node.asText();
+            return text == null || text.isBlank() ? null : text;
+        }
+    }
+
     public static class ChatRequest {
 
         @JsonProperty("model")
