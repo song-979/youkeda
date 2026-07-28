@@ -75,6 +75,11 @@ p {
     padding-right: 2px;
 }
 
+.sidebar {
+    /* Reserve a stable area for the fixed local date and time. */
+    padding-top: 116px;
+}
+
 .main-stage {
     display: flex;
     flex-direction: column;
@@ -670,6 +675,10 @@ textarea:focus {
         overflow: visible;
     }
 
+    .sidebar {
+        padding-top: 0;
+    }
+
     .conversation-board {
         min-height: 75vh;
     }
@@ -726,5 +735,236 @@ textarea:focus {
 
     .send-btn {
         width: 100%;
+    }
+}
+
+/* Full-screen theme layer. The background always keeps its original aspect ratio. */
+.ambient-clock {
+    position: fixed;
+    z-index: 20;
+    top: 28px;
+    left: 32px;
+    display: grid;
+    gap: 4px;
+    pointer-events: none;
+    color: var(--text);
+    text-shadow: 0 1px 10px rgba(255, 255, 255, 0.45);
+}
+
+.ambient-clock p {
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.ambient-clock time {
+    font-size: 36px;
+    font-weight: 800;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+}
+
+.daily-remaining {
+    position: fixed;
+    z-index: 20;
+    right: 32px;
+    bottom: 24px;
+    margin: 0;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 700;
+    text-shadow: 0 1px 10px rgba(255, 255, 255, 0.45);
+}
+
+.daily-remaining span {
+    margin-left: 6px;
+}
+
+.theme-switch {
+    display: inline-flex;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface-soft);
+}
+
+.theme-choice {
+    height: 36px;
+    padding: 0 14px;
+    border: 0;
+    border-right: 1px solid var(--line);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+}
+
+.theme-choice:last-child {
+    border-right: 0;
+}
+
+.theme-choice.active {
+    background: var(--primary);
+    color: #ffffff;
+}
+
+.status-cluster > .status-pill {
+    display: none;
+}
+
+body.theme-girl {
+    --surface: rgba(8, 18, 43, 0.72);
+    --surface-strong: rgba(11, 23, 51, 0.88);
+    --surface-soft: rgba(12, 27, 60, 0.78);
+    --line: rgba(234, 244, 255, 0.45);
+    --text: #ffffff;
+    --muted: #edf5ff;
+    --primary: #ec5c9a;
+    --primary-soft: rgba(255, 202, 225, 0.28);
+    --shadow: 0 18px 44px rgba(1, 7, 23, 0.3);
+    position: relative;
+    isolation: isolate;
+    background-color: #122042;
+    background-image: linear-gradient(rgba(6, 15, 35, 0.08), rgba(6, 15, 35, 0.28)), url("assets/girl-theme.jpg");
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    background-attachment: fixed;
+}
+
+body.theme-girl::before {
+    content: "";
+    position: fixed;
+    z-index: 0;
+    inset: -24px;
+    background: url("assets/girl-theme.jpg") center / cover no-repeat fixed;
+    filter: blur(18px) brightness(0.58);
+    transform: scale(1.06);
+    pointer-events: none;
+}
+
+body.theme-girl .app-shell {
+    position: relative;
+    z-index: 1;
+}
+
+body.theme-girl .ambient-clock,
+body.theme-girl .daily-remaining {
+    color: #ffffff;
+    text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
+}
+
+body.theme-girl .mode-toolbar,
+body.theme-girl .composer {
+    background: rgba(7, 16, 38, 0.72);
+}
+
+body.theme-girl .tool-inline-row input,
+body.theme-girl .tool-inline-row select,
+body.theme-girl .tool-textarea,
+body.theme-girl textarea,
+body.theme-girl .tool-btn,
+body.theme-girl .attachment-chip,
+body.theme-girl .meta-list li,
+body.theme-girl .result-image {
+    background: rgba(8, 20, 47, 0.86);
+    color: #ffffff;
+}
+
+body.theme-girl .tool-card:hover {
+    background: rgba(30, 56, 105, 0.84);
+    border-color: rgba(255, 255, 255, 0.72);
+}
+
+/* In the girl theme, leave the artwork unobscured and use text contrast instead of panels. */
+body.theme-girl {
+    --surface: transparent;
+    --surface-strong: transparent;
+    --surface-soft: transparent;
+    --shadow: none;
+    background-image: url("assets/girl-theme.jpg");
+}
+
+body.theme-girl::before {
+    filter: blur(22px) brightness(0.68);
+    opacity: 0.62;
+}
+
+body.theme-girl .brand,
+body.theme-girl .panel,
+body.theme-girl .conversation-board,
+body.theme-girl .topbar,
+body.theme-girl .mode-toolbar,
+body.theme-girl .composer,
+body.theme-girl .tool-workbench,
+body.theme-girl .tool-card,
+body.theme-girl .bubble,
+body.theme-girl .task-summary,
+body.theme-girl .result-card,
+body.theme-girl .task-steps li,
+body.theme-girl .meta-list li,
+body.theme-girl .tool-btn,
+body.theme-girl .theme-switch,
+body.theme-girl .segmented-control,
+body.theme-girl .voice-toggle,
+body.theme-girl .attachment-chip,
+body.theme-girl .tool-inline-row input,
+body.theme-girl .tool-inline-row select,
+body.theme-girl .tool-textarea,
+body.theme-girl textarea {
+    background: transparent !important;
+    backdrop-filter: none;
+    box-shadow: none;
+}
+
+body.theme-girl .brand,
+body.theme-girl .panel,
+body.theme-girl .conversation-board,
+body.theme-girl .topbar,
+body.theme-girl .bubble,
+body.theme-girl .tool-card,
+body.theme-girl .tool-btn,
+body.theme-girl .theme-switch,
+body.theme-girl .segmented-control,
+body.theme-girl .voice-toggle,
+body.theme-girl .tool-inline-row input,
+body.theme-girl .tool-inline-row select,
+body.theme-girl .tool-textarea,
+body.theme-girl textarea {
+    border-color: rgba(255, 255, 255, 0.34);
+}
+
+body.theme-girl .theme-choice.active,
+body.theme-girl .segment.active,
+body.theme-girl .message.user .bubble {
+    background: transparent !important;
+    color: #ffffff;
+    box-shadow: inset 0 -2px 0 #ffffff;
+}
+
+body.theme-girl .app-shell,
+body.theme-girl .tool-card span,
+body.theme-girl .bubble-label,
+body.theme-girl .result-label,
+body.theme-girl .composer-hint,
+body.theme-girl .tool-inline-meta,
+body.theme-girl .task-summary p,
+body.theme-girl .result-card p,
+body.theme-girl textarea::placeholder {
+    color: #f5f8ff !important;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.86);
+}
+
+@media (max-width: 720px) {
+    .ambient-clock {
+        top: 18px;
+        left: 20px;
+    }
+
+    .ambient-clock time {
+        font-size: 30px;
+    }
+
+    .daily-remaining {
+        right: 20px;
+        bottom: 16px;
     }
 }

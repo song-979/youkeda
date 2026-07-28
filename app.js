@@ -37,6 +37,9 @@ const toolWorkbenchTitle = document.getElementById("toolWorkbenchTitle");
 const toolWorkbenchDesc = document.getElementById("toolWorkbenchDesc");
 const toolWorkbenchBody = document.getElementById("toolWorkbenchBody");
 const toolWorkbenchClose = document.getElementById("toolWorkbenchClose");
+const localDate = document.getElementById("localDate");
+const localTime = document.getElementById("localTime");
+const dailyRemaining = document.getElementById("dailyRemaining");
 
 backendMode.textContent = API_BASE;
 
@@ -44,6 +47,7 @@ bindEvents();
 renderMode();
 renderAttachmentStrip();
 renderInputSummary();
+initializeAppearance();
 checkBackendStatus();
 
 function bindEvents() {
@@ -58,6 +62,10 @@ function bindEvents() {
         button.addEventListener("click", () => {
             handleToolAction(button.dataset.tool);
         });
+    });
+
+    document.querySelectorAll("[data-theme]").forEach((button) => {
+        button.addEventListener("click", () => applyTheme(button.dataset.theme));
     });
 
     toolWorkbenchClose.addEventListener("click", closeToolWorkbench);
@@ -154,6 +162,58 @@ function bindEvents() {
             setSubmitting(false);
         }
     });
+}
+
+function initializeAppearance() {
+    let savedTheme = "minimal";
+    try {
+        savedTheme = window.localStorage.getItem("assistantTheme") || "minimal";
+    } catch (error) {
+        savedTheme = "minimal";
+    }
+
+    applyTheme(savedTheme, false);
+    updateLocalClock();
+    window.setInterval(updateLocalClock, 1000);
+}
+
+function applyTheme(theme, persist = true) {
+    const normalizedTheme = theme === "girl" ? "girl" : "minimal";
+    document.body.classList.toggle("theme-girl", normalizedTheme === "girl");
+    document.querySelectorAll("[data-theme]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.theme === normalizedTheme);
+    });
+
+    if (persist) {
+        try {
+            window.localStorage.setItem("assistantTheme", normalizedTheme);
+        } catch (error) {
+            // Theme still works for the current page when browser storage is unavailable.
+        }
+    }
+}
+
+function updateLocalClock() {
+    const now = new Date();
+    localDate.textContent = new Intl.DateTimeFormat("zh-CN", {
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+        weekday: "long"
+    }).format(now);
+    localTime.textContent = new Intl.DateTimeFormat("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false
+    }).format(now);
+
+    const remainingSeconds = (23 - now.getHours()) * 3600
+        + (59 - now.getMinutes()) * 60
+        + (59 - now.getSeconds());
+    const hours = Math.floor(remainingSeconds / 3600);
+    const minutes = Math.floor((remainingSeconds % 3600) / 60);
+    dailyRemaining.textContent = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
 function resolveApiBase() {

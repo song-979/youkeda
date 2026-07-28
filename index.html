@@ -7,16 +7,13 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+<div class="ambient-clock" aria-live="polite">
+    <p id="localDate">--</p>
+    <time id="localTime">--:--</time>
+</div>
+<p class="daily-remaining">今日剩余 <span id="dailyRemaining">--</span></p>
 <div class="app-shell">
     <aside class="sidebar">
-        <div class="brand">
-            <div class="brand-mark">A</div>
-            <div>
-                <p class="eyebrow">Private Assistant</p>
-                <h1>Assistant Deck</h1>
-            </div>
-        </div>
-
         <section class="panel">
             <div class="section-head">
                 <h2>已接能力</h2>
@@ -79,6 +76,10 @@
                 <h2>文本与图片双模式工作台</h2>
             </div>
             <div class="status-cluster">
+                <div class="theme-switch" role="group" aria-label="主题切换">
+                    <button type="button" class="theme-choice active" data-theme="minimal">简约</button>
+                    <button type="button" class="theme-choice" data-theme="girl">少女</button>
+                </div>
                 <span class="status-pill online" id="modeBadge">连接检测中</span>
                 <span class="status-pill" id="voiceBadge">语音输出关闭</span>
             </div>
