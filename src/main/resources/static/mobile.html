@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Assistant Deck</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="mobile.css?v=20260729-2">
+</head>
+<body>
+<div class="ambient-clock" aria-live="polite">
+    <p id="localDate">--</p>
+    <time id="localTime">--:--</time>
+</div>
+<p class="daily-remaining">今日剩余 <span id="dailyRemaining">--</span></p>
+<div class="app-shell">
+    <aside class="sidebar">
+        <section class="panel">
+            <div class="section-head">
+                <h2>已接能力</h2>
+                <span>Ready</span>
+            </div>
+            <ul class="mini-list">
+                <li><span class="dot good"></span>文本大模型</li>
+                <li><span class="dot good"></span>图片工厂</li>
+                <li><span class="dot good"></span>图片理解</li>
+                <li><span class="dot good"></span>文件解析</li>
+            </ul>
+        </section>
+
+        <section class="panel tool-panel">
+            <div class="section-head">
+                <h2>工具栏</h2>
+                <span>Tools</span>
+            </div>
+            <div class="tool-grid">
+                <button class="tool-card" data-tool="location">
+                    <strong>定位</strong>
+                    <span>读取当前位置并反查地址</span>
+                </button>
+                <button class="tool-card" data-tool="taxi">
+                    <strong>打车</strong>
+                    <span>生成滴滴官方行程链接</span>
+                </button>
+                <button class="tool-card" data-tool="weather">
+                    <strong>天气</strong>
+                    <span>查询实时天气和预报</span>
+                </button>
+                <button class="tool-card" data-tool="ip">
+                    <strong>IP</strong>
+                    <span>查询当前公网 IP 信息</span>
+                </button>
+                <button class="tool-card" data-tool="around">
+                    <strong>周边搜索</strong>
+                    <span>基于当前位置搜索店铺和地点</span>
+                </button>
+                <button class="tool-card" data-tool="route">
+                    <strong>路线规划</strong>
+                    <span>驾车、步行、公交、骑行方案</span>
+                </button>
+                <button class="tool-card" data-tool="reminder">
+                    <strong>定时提醒</strong>
+                    <span>创建和查看提醒事项</span>
+                </button>
+                <button class="tool-card" data-tool="schedule">
+                    <strong>日程</strong>
+                    <span>创建并查看时间安排</span>
+                </button>
+            </div>
+        </section>
+    </aside>
+
+    <main class="main-stage">
+        <header class="topbar">
+            <div>
+                <p class="eyebrow">Web Assistant</p>
+                <h2>文本与图片双模式工作台</h2>
+            </div>
+            <div class="status-cluster">
+                <div class="theme-switch" role="group" aria-label="主题切换">
+                    <button type="button" class="theme-choice active" data-theme="minimal">简约</button>
+                    <button type="button" class="theme-choice" data-theme="girl">少女</button>
+                </div>
+                <span class="status-pill online" id="modeBadge">连接检测中</span>
+                <span class="status-pill" id="voiceBadge">语音输出关闭</span>
+            </div>
+        </header>
+
+        <section class="conversation-board">
+            <div class="mode-toolbar">
+                <div class="segmented-control" role="tablist" aria-label="模式切换">
+                    <button type="button" class="segment active" data-mode-button="text">文本大模型</button>
+                    <button type="button" class="segment" data-mode-button="image">图片工厂</button>
+                </div>
+
+                <label class="voice-toggle" id="voiceToggleWrap">
+                    <input type="checkbox" id="voiceToggle">
+                    <span>语音输出</span>
+                </label>
+            </div>
+
+            <section class="tool-workbench" id="toolWorkbench" hidden>
+                <div class="tool-workbench-head">
+                    <div>
+                        <p class="bubble-label" id="toolWorkbenchLabel">工具</p>
+                        <strong id="toolWorkbenchTitle">工具面板</strong>
+                    </div>
+                    <button type="button" class="tool-btn subtle" id="toolWorkbenchClose">收起</button>
+                </div>
+                <p class="tool-workbench-desc" id="toolWorkbenchDesc"></p>
+                <div class="tool-workbench-body" id="toolWorkbenchBody"></div>
+            </section>
+
+            <div class="messages" id="messages">
+                <article class="message assistant">
+                    <div class="avatar soft">A</div>
+                    <div class="bubble">
+                        <p class="bubble-label">助手</p>
+                        <div class="bubble-content">默认是“文本大模型”。你可以直接输入文字，也可以同时带上图片和文件。</div>
+                    </div>
+                </article>
+            </div>
+
+            <form class="composer" id="composer">
+                <div class="attachment-strip" id="attachmentStrip" hidden></div>
+
+                <div class="composer-tools">
+                    <button type="button" class="tool-btn" id="addImageButton">添加图片</button>
+                    <button type="button" class="tool-btn" id="addFileButton">添加文件</button>
+                    <p class="composer-hint" id="composerHint">当前模式：文本大模型</p>
+                </div>
+
+                <label class="composer-box">
+                    <textarea id="messageInput" rows="1" placeholder="输入内容，或只上传图片 / 文件后直接发送"></textarea>
+                    <button type="submit" class="send-btn" id="sendButton">发送</button>
+                </label>
+
+                <input id="imageInput" type="file" accept="image/*" multiple hidden>
+                <input id="fileInput" type="file" multiple hidden>
+            </form>
+        </section>
+    </main>
+
+    <aside class="detail-rail">
+        <section class="panel">
+            <div class="section-head">
+                <h2>连接状态</h2>
+                <span>API</span>
+            </div>
+            <div class="result-card">
+                <p class="result-label">接口地址</p>
+                <h3 id="backendMode">检测中</h3>
+                <p id="backendStatus">正在检查后端状态</p>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="section-head">
+                <h2>当前任务</h2>
+                <span>Now</span>
+            </div>
+            <div id="taskSummary" class="task-summary">
+                <strong>待命中</strong>
+                <p>等待新的输入。发送后会在这里显示处理阶段。</p>
+            </div>
+            <ul class="task-steps" id="taskSteps">
+                <li class="active">等待输入</li>
+                <li>整理内容</li>
+                <li>调用能力</li>
+                <li>返回结果</li>
+            </ul>
+        </section>
+
+        <section class="panel">
+            <div class="section-head">
+                <h2>本次输入</h2>
+                <span>Live</span>
+            </div>
+            <div class="result-card">
+                <p class="result-label">模式摘要</p>
+                <h3 id="modeSummary">文本大模型</h3>
+                <ul class="mini-list" id="inputSummary">
+                    <li><span class="dot quiet"></span>暂无已选内容</li>
+                </ul>
+            </div>
+        </section>
+    </aside>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

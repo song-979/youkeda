@@ -427,8 +427,12 @@ public class WebAssistantController {
             if (ttsClient == null) {
                 notices.add("当前环境未启用语音输出，已返回文字结果。");
             } else {
-                TtsResult ttsResult = ttsClient.synthesize(answer);
-                audio = toAudioAsset(ttsResult);
+                try {
+                    TtsResult ttsResult = ttsClient.synthesize(answer);
+                    audio = toAudioAsset(ttsResult);
+                } catch (IOException ex) {
+                    notices.add("语音生成暂时失败，已返回文字结果。");
+                }
             }
         }
 

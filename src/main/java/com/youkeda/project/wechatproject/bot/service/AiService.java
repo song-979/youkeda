@@ -345,34 +345,40 @@ public final class AiService {
 
         @Override
         public byte[] generate(String prompt) throws IOException {
-            String taskId = submitTask(prompt);
-            log.info("image gen task submitted: taskId={}", taskId);
-
-            String imageUrl = pollTask(taskId);
+            String imageUrl = submitOrGetImageUrl(prompt);
 
             log.info("image gen task completed, downloading from: {}", imageUrl);
             return downloadImage(imageUrl);
         }
 
-        private String submitTask(String prompt) throws IOException {
+        private String submitOrGetImageUrl(String prompt) throws IOException {
             Map<String, Object> requestBody = buildRequestBody(prompt);
 
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
             headers.setBearerAuth(apiKey);
-            headers.set("X-DashScope-Async", "enable");
 
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(requestBody, headers);
 
             try {
-                ResponseEntity<TaskSubmitResponse> response = restTemplate.postForEntity(
-                        apiUrl, entity, TaskSubmitResponse.class);
-
-                TaskSubmitResponse body = response.getBody();
-                if (body == null || body.output == null || body.output.taskId == null) {
-                    throw new IOException("task submission returned no task_id");
+                ResponseEntity<String> response = restTemplate.postForEntity(apiUrl, entity, String.class);
+                String raw = response.getBody();
+                if (raw == null || raw.isBlank()) {
+                    throw new IOException("image generation returned an empty response");
                 }
-                return body.output.taskId;
+
+                JsonNode output = OBJECT_MAPPER.readTree(raw).path("output");
+                String taskId = textOrNull(output.path("task_id"));
+                if (taskId != null) {
+                    log.info("image gen task submitted: taskId={}", taskId);
+                    return pollTask(taskId);
+                }
+
+                String imageUrl = extractImageUrlFromOutput(output);
+                if (imageUrl != null) {
+                    return imageUrl;
+                }
+                throw new IOException("image generation response contained no task or image: " + raw);
 
             } catch (RestClientException e) {
                 log.error("image gen task submission failed: url={}, model={}, error={}",

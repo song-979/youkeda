@@ -1234,11 +1234,7 @@ function appendAssistantResponse(response) {
 
     if (response.audio && response.audio.dataUrl) {
         hasAssets = true;
-        const audio = document.createElement("audio");
-        audio.className = "audio-player";
-        audio.controls = true;
-        audio.src = response.audio.dataUrl;
-        assets.append(audio);
+        assets.append(buildVoiceBubble(response.audio));
     }
 
     if (Array.isArray(response.links) && response.links.length > 0) {
@@ -1296,6 +1292,67 @@ function buildMetaBlock(title, lines) {
 
     block.append(label, list);
     return block;
+}
+
+function buildVoiceBubble(audioAsset) {
+    const wrap = document.createElement("div");
+    wrap.className = "voice-bubble";
+
+    const playButton = document.createElement("button");
+    playButton.type = "button";
+    playButton.className = "voice-play";
+    playButton.setAttribute("aria-label", "播放语音回复");
+    playButton.textContent = "▶";
+
+    const wave = document.createElement("div");
+    wave.className = "voice-wave";
+    for (let i = 0; i < 16; i += 1) {
+        const bar = document.createElement("span");
+        bar.style.setProperty("--i", String(i));
+        wave.append(bar);
+    }
+
+    const meta = document.createElement("span");
+    meta.className = "voice-meta";
+    meta.textContent = audioAsset.fileName || "语音回复";
+
+    const audio = document.createElement("audio");
+    audio.className = "audio-player";
+    audio.preload = "metadata";
+    audio.src = audioAsset.dataUrl;
+
+    playButton.addEventListener("click", async () => {
+        if (!audio.paused) {
+            audio.pause();
+            return;
+        }
+        try {
+            await audio.play();
+        } catch (error) {
+            audio.controls = true;
+        }
+    });
+
+    audio.addEventListener("play", () => {
+        wrap.classList.add("playing");
+        playButton.textContent = "❚❚";
+    });
+    audio.addEventListener("pause", () => {
+        wrap.classList.remove("playing");
+        playButton.textContent = "▶";
+    });
+    audio.addEventListener("ended", () => {
+        wrap.classList.remove("playing");
+        playButton.textContent = "▶";
+    });
+    audio.addEventListener("loadedmetadata", () => {
+        if (Number.isFinite(audio.duration) && audio.duration > 0) {
+            meta.textContent = `${Math.round(audio.duration)} 秒 · 语音回复`;
+        }
+    });
+
+    wrap.append(playButton, wave, meta, audio);
+    return wrap;
 }
 
 function buildLinkBlock(title, links) {

@@ -461,11 +461,15 @@ public final class VoiceService {
         private final String apiKey;
         private final String model;
         private final String voice;
+        private final String format;
+        private final int sampleRate;
 
         public Qwen3TtsFlashClient(SpeechProperties props) {
             this.apiKey = props.getApiKey();
             this.model = props.getTts().getModel();
             this.voice = props.getTts().getVoice();
+            this.format = props.getTts().getFormat();
+            this.sampleRate = props.getTts().getSampleRate();
             this.apiUrl = resolveTtsApiUrl(props);
             this.restTemplate = createRestTemplate(10000, 120000);
         }
@@ -522,6 +526,11 @@ public final class VoiceService {
                 body.put("model", model);
                 body.put("input", input);
 
+                Map<String, Object> parameters = new LinkedHashMap<>();
+                parameters.put("response_format", format);
+                parameters.put("sample_rate", sampleRate);
+                body.put("parameters", parameters);
+
                 HttpHeaders headers = new HttpHeaders();
                 headers.setContentType(MediaType.APPLICATION_JSON);
                 headers.setBearerAuth(apiKey);
@@ -539,9 +548,10 @@ public final class VoiceService {
                 }
 
                 log.info("Qwen3-TTS-Flash generated audio: {}B", audioBytes.length);
-                return new TtsResult(audioBytes, "wav", 24000, 0);
+                return new TtsResult(audioBytes, format, sampleRate, 0);
 
             } catch (IOException e) {
+                log.warn("Qwen3-TTS-Flash request failed: {}", e.getMessage());
                 throw e;
             } catch (Exception e) {
                 log.error("Qwen3-TTS-Flash TTS failed", e);
