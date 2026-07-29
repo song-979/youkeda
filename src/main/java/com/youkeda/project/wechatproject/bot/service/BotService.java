@@ -188,8 +188,8 @@ public final class BotService {
                         ? qrcode.substring(0, 80) + "..." : qrcode;
                 log.info("iLink QR code obtained ({} chars), preview: {}", qrcode != null ? qrcode.length() : 0, qrPreview);
                 System.out.println("\n========================================");
-                System.out.println("  请浏览器打开以下地址扫码登录微信:");
-                System.out.println("  http://localhost:8080/ilink/qrcode");
+                System.out.println("  请浏览器打开以下地址完成首次配置:");
+                System.out.println("  http://localhost:8080");
                 System.out.println("========================================\n");
             } catch (Exception e) {
                 log.error("iLink auto-login failed on startup", e);

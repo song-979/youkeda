@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>微信 AI 助手 - 安装向导</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --green: #07C160;
+            --green-dark: #06AD56;
+            --green-light: #e8f5e9;
+            --text: #1a1a1a;
+            --text-secondary: #666;
+            --text-muted: #999;
+            --border: #e0e0e0;
+            --bg: #f5f5f5;
+            --card: #ffffff;
+            --radius: 12px;
+            --shadow: 0 2px 16px rgba(0,0,0,0.06);
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 560px;
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            margin-bottom: 24px;
+        }
+        .header .logo {
+            width: 56px; height: 56px;
+            background: linear-gradient(135deg, var(--green), var(--green-dark));
+            border-radius: 14px;
+            margin: 0 auto 16px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 28px;
+            color: #fff;
+        }
+        .header h1 { font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+        .header p { font-size: 14px; color: var(--text-muted); }
+
+        /* Step indicator */
+        .steps {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 28px;
+        }
+        .step-dot {
+            width: 32px; height: 32px;
+            border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 13px; font-weight: 600;
+            background: var(--border);
+            color: var(--text-muted);
+            transition: all 0.3s;
+        }
+        .step-dot.active { background: var(--green); color: #fff; }
+        .step-dot.done { background: var(--green-light); color: var(--green); }
+        .step-line {
+            width: 40px; height: 2px;
+            background: var(--border);
+            border-radius: 1px;
+            transition: background 0.3s;
+        }
+        .step-line.done { background: var(--green); }
+
+        /* Card */
+        .card {
+            background: var(--card);
+            border-radius: 16px;
+            box-shadow: var(--shadow);
+            padding: 36px 32px;
+            transition: all 0.3s;
+        }
+
+        /* Step content */
+        .step-content { display: none; }
+        .step-content.active { display: block; }
+
+        .step-title {
+            font-size: 18px; font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .step-desc {
+            font-size: 14px; color: var(--text-secondary);
+            margin-bottom: 24px;
+            line-height: 1.6;
+        }
+
+        /* QR Code area */
+        .qr-section {
+            text-align: center;
+            padding: 16px 0;
+        }
+        .qr-wrapper {
+            display: inline-block;
+            padding: 12px;
+            background: #fff;
+            border-radius: 16px;
+            border: 2px solid var(--border);
+            margin-bottom: 16px;
+            transition: border-color 0.3s;
+        }
+        .qr-wrapper.scanned { border-color: var(--green); }
+        .qr-wrapper img {
+            display: block;
+            border-radius: 8px;
+            width: 240px;
+            height: 240px;
+        }
+        .login-status {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-top: 8px;
+        }
+        .login-status .spinner {
+            display: inline-block;
+            width: 14px; height: 14px;
+            border: 2px solid var(--border);
+            border-top-color: var(--green);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+            margin-right: 6px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .login-success {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--green);
+            font-weight: 500;
+        }
+        .login-success .icon { font-size: 18px; }
+
+        /* Form */
+        .form-group {
+            margin-bottom: 18px;
+        }
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+        .form-group label .required {
+            color: #e74c3c;
+            margin-left: 2px;
+        }
+        .form-group input, .form-group textarea, .form-group select {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1.5px solid var(--border);
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+            color: var(--text);
+            background: #fafafa;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            outline: none;
+        }
+        .form-group input:focus, .form-group textarea:focus, .form-group select:focus {
+            border-color: var(--green);
+            box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.1);
+            background: #fff;
+        }
+        .form-group textarea { resize: vertical; min-height: 80px; }
+        .form-group .hint {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        /* Feature toggles */
+        .feature-list { display: flex; flex-direction: column; gap: 10px; }
+        .feature-item {
+            border: 1.5px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+            transition: border-color 0.2s;
+        }
+        .feature-item.checked { border-color: var(--green); }
+        .feature-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.2s;
+        }
+        .feature-header:hover { background: #fafafa; }
+        .feature-header input[type="checkbox"] {
+            width: 18px; height: 18px;
+            accent-color: var(--green);
+            flex-shrink: 0;
+        }
+        .feature-header .name { font-size: 14px; font-weight: 500; flex: 1; }
+        .feature-header .arrow {
+            font-size: 12px; color: var(--text-muted);
+            transition: transform 0.3s;
+        }
+        .feature-item.checked .arrow { transform: rotate(180deg); }
+        .feature-config {
+            display: none;
+            padding: 0 16px 16px 44px;
+            border-top: 1px solid var(--border);
+        }
+        .feature-item.checked .feature-config { display: block; }
+
+        /* Buttons */
+        .btn-row {
+            display: flex;
+            gap: 12px;
+            margin-top: 28px;
+        }
+        .btn {
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .btn-primary {
+            background: var(--green);
+            color: #fff;
+            flex: 1;
+        }
+        .btn-primary:hover:not(:disabled) { background: var(--green-dark); }
+        .btn-secondary {
+            background: #fff;
+            color: var(--text-secondary);
+            border: 1.5px solid var(--border);
+        }
+        .btn-secondary:hover:not(:disabled) { background: #f5f5f5; }
+
+        /* Alert / message */
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            margin-bottom: 16px;
+            line-height: 1.5;
+        }
+        .alert-info { background: #e8f4fd; color: #1a6fb5; border: 1px solid #cce5f6; }
+        .alert-success { background: var(--green-light); color: var(--green-dark); border: 1px solid #c8e6c9; }
+        .alert-error { background: #fff5f5; color: #c0392b; border: 1px solid #ffccc7; }
+
+        /* Saved badge */
+        .saved-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            background: var(--green-light);
+            color: var(--green);
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+
+        /* Responsive */
+        @media (max-width: 480px) {
+            .card { padding: 24px 20px; }
+            .form-row { grid-template-columns: 1fr; }
+            .step-line { width: 24px; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div class="logo">&#128172;</div>
+        <h1>微信 AI 助手</h1>
+        <p>安装向导</p>
+    </div>
+
+    <!-- Step indicator -->
+    <div class="steps" id="stepIndicator">
+        <div class="step-dot active" data-step="1">1</div>
+        <div class="step-line" data-step="1-2"></div>
+        <div class="step-dot" data-step="2">2</div>
+        <div class="step-line" data-step="2-3"></div>
+        <div class="step-dot" data-step="3">3</div>
+        <div class="step-line" data-step="3-4"></div>
+        <div class="step-dot" data-step="4">4</div>
+    </div>
+
+    <!-- Card -->
+    <div class="card" id="formCard">
+        <!-- ====== Step 1: iLink Login ====== -->
+        <div class="step-content active" data-step="1">
+            <div class="step-title">第一步：连接微信</div>
+            <div class="step-desc">请使用微信扫描下方二维码，完成 iLink 登录。</div>
+            <div class="qr-section">
+                <div class="qr-wrapper" id="qrWrapper">
+                    <img id="qrImage" src="" alt="QR Code" style="display:none;">
+                    <div id="qrPlaceholder" style="width:240px;height:240px;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:14px;">
+                        <span class="spinner"></span> 正在获取二维码...
+                    </div>
+                </div>
+                <div class="login-status" id="loginStatus">
+                    <span class="spinner"></span> 等待扫码登录...
+                </div>
+            </div>
+        </div>
+
+        <!-- ====== Step 2: Orchestration Model ====== -->
+        <div class="step-content" data-step="2">
+            <div class="step-title">第二步：编排大模型</div>
+            <div class="step-desc">
+                编排大模型负责理解用户需求、将复杂任务分解为子任务、调度下游模型、校验结果。
+                <br>推荐使用推理能力强的大模型（如 DeepSeek-V3、GPT-4o、Claude 4 等）。
+            </div>
+            <div class="form-group">
+                <label>API 地址 <span class="required">*</span></label>
+                <input type="url" id="intentApiUrl" placeholder="https://api.deepseek.com/v1">
+                <span class="hint">支持任何 OpenAI 兼容接口，如 DeepSeek、通义千问、OpenAI 等</span>
+            </div>
+            <div class="form-group">
+                <label>API Key <span class="required">*</span></label>
+                <input type="password" id="intentApiKey" placeholder="sk-xxxxxxxxxxxxxxxx">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>模型名称 <span class="required">*</span></label>
+                    <input type="text" id="intentModel" placeholder="deepseek-chat">
+                </div>
+                <div class="form-group">
+                    <label>Temperature</label>
+                    <input type="number" id="intentTemperature" value="0.7" min="0" max="2" step="0.1">
+                </div>
+            </div>
+            <div class="alert alert-info">
+                <strong>提示：</strong>如果不配置编排大模型，系统将自动复用第三步的对话大模型。
+            </div>
+        </div>
+
+        <!-- ====== Step 3: ChatAgent Model ====== -->
+        <div class="step-content" data-step="3">
+            <div class="step-title">第三步：对话大模型 <span style="color:#c0392b;">*</span></div>
+            <div class="step-desc">
+                对话大模型负责与用户直接交流，调用工具（搜索、地图、天气等），生成回复内容。
+                <br>这是<strong>必须配置</strong>的核心模型。
+            </div>
+            <div class="form-group">
+                <label>API 地址 <span class="required">*</span></label>
+                <input type="url" id="chatApiUrl" placeholder="https://api.deepseek.com/v1">
+                <span class="hint">支持任何 OpenAI 兼容接口</span>
+            </div>
+            <div class="form-group">
+                <label>API Key <span class="required">*</span></label>
+                <input type="password" id="chatApiKey" placeholder="sk-xxxxxxxxxxxxxxxx">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>模型名称 <span class="required">*</span></label>
+                    <input type="text" id="chatModel" placeholder="deepseek-chat">
+                </div>
+                <div class="form-group">
+                    <label>Temperature</label>
+                    <input type="number" id="chatTemperature" value="0.7" min="0" max="2" step="0.1">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Max Tokens</label>
+                <input type="number" id="chatMaxTokens" value="2000" min="100" max="128000" step="100">
+            </div>
+        </div>
+
+        <!-- ====== Step 4: Optional Features ====== -->
+        <div class="step-content" data-step="4">
+            <div class="step-title">第四步：可选功能</div>
+            <div class="step-desc">勾选你需要启用的功能，然后进行相应配置。</div>
+
+            <div class="feature-list">
+                <!-- Speech STT -->
+                <div class="feature-item" data-feature="speech-stt">
+                    <div class="feature-header" onclick="toggleFeature('speech-stt')">
+                        <input type="checkbox" id="chkSpeechStt" onchange="syncFeatureCheck('speech-stt')">
+                        <span class="name">语音识别 (STT)</span>
+                        <span class="arrow">▼</span>
+                    </div>
+                    <div class="feature-config">
+                        <div class="form-group">
+                            <label>API 地址</label>
+                            <input type="url" id="sttApiUrl" placeholder="https://xxx/compatible-mode/v1/chat/completions">
+                        </div>
+                        <div class="form-group">
+                            <label>模型名称</label>
+                            <input type="text" id="sttModel" value="qwen3-asr-flash">
+                        </div>
+                        <div class="form-group">
+                            <label>Speech API Key（与 TTS 共用）</label>
+                            <input type="password" id="speechApiKey" placeholder="sk-xxxxxxxx">
+                        </div>
+                        <div class="form-group">
+                            <label>Speech API 地址（与 TTS 共用）</label>
+                            <input type="url" id="speechApiUrl" placeholder="https://xxx/compatible-mode/v1">
+                        </div>
+                        <div class="form-group">
+                            <label>FFmpeg 路径</label>
+                            <input type="text" id="sttFfmpegPath" value="ffmpeg" placeholder="ffmpeg 或 /usr/local/bin/ffmpeg">
+                            <span class="hint">默认使用系统 PATH 中的 ffmpeg，也可指定完整路径</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Speech TTS -->
+                <div class="feature-item" data-feature="speech-tts">
+                    <div class="feature-header" onclick="toggleFeature('speech-tts')">
+                        <input type="checkbox" id="chkSpeechTts" onchange="syncFeatureCheck('speech-tts')">
+                        <span class="name">语音合成 (TTS)</span>
+                        <span class="arrow">▼</span>
+                    </div>
+                    <div class="feature-config">
+                        <div class="form-group">
+                            <label>语音模型</label>
+                            <input type="text" id="ttsModel" value="qwen3-tts-flash">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>音色</label>
+                                <select id="ttsVoice">
+                                    <option value="Cherry">Cherry (女声/知性)</option>
+                                    <option value="longanhuan_v3.6">Longanhuan (女声/甜美)</option>
+                                    <option value="zhixiaobai">Zhixiaobai (男声/清晰)</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>采样率</label>
+                                <select id="ttsSampleRate">
+                                    <option value="24000">24000</option>
+                                    <option value="16000">16000</option>
+                                    <option value="8000">8000</option>
+                                </select>
+                            </div>
+                        </div>
+                        <span class="hint">语音识别和语音合成共用 Speech API Key 和 API 地址，在语音识别中配置</span>
+                    </div>
+                </div>
+
+                <!-- Image Gen -->
+                <div class="feature-item" data-feature="image-gen">
+                    <div class="feature-header" onclick="toggleFeature('image-gen')">
+                        <input type="checkbox" id="chkImageGen" onchange="syncFeatureCheck('image-gen')">
+                        <span class="name">文生图</span>
+                        <span class="arrow">▼</span>
+                    </div>
+                    <div class="feature-config">
+                        <div class="form-group">
+                            <label>API 地址</label>
+                            <input type="url" id="imageGenApiUrl" placeholder="https://xxx/v1/images/generations">
+                        </div>
+                        <div class="form-group">
+                            <label>API Key</label>
+                            <input type="password" id="imageGenApiKey" placeholder="sk-xxxxxxxx">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>模型名称</label>
+                                <input type="text" id="imageGenModel" value="dall-e-3">
+                            </div>
+                            <div class="form-group">
+                                <label>图片尺寸</label>
+                                <select id="imageGenSize">
+                                    <option value="1024x1024">1024x1024</option>
+                                    <option value="1792x1024">1792x1024 (宽)</option>
+                                    <option value="1024x1792">1024x1792 (高)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Weather / Map -->
+                <div class="feature-item" data-feature="weather">
+                    <div class="feature-header" onclick="toggleFeature('weather')">
+                        <input type="checkbox" id="chkWeather" onchange="syncFeatureCheck('weather')">
+                        <span class="name">天气查询 & 地图导航（高德地图）</span>
+                        <span class="arrow">▼</span>
+                    </div>
+                    <div class="feature-config">
+                        <div class="form-group">
+                            <label>高德 API Key</label>
+                            <input type="password" id="amapKey" placeholder="高德 Web API Key">
+                        </div>
+                        <div class="form-group">
+                            <label>高德 Private Key</label>
+                            <input type="password" id="amapPrivateKey" placeholder="高德 Private Key">
+                        </div>
+                        <span class="hint">在 <a href="https://lbs.amap.com/" target="_blank">高德开放平台</a> 申请，包含天气查询、地点搜索、路径规划、静态地图功能</span>
+                    </div>
+                </div>
+
+                <!-- Web Search -->
+                <div class="feature-item" data-feature="web-search">
+                    <div class="feature-header" onclick="toggleFeature('web-search')">
+                        <input type="checkbox" id="chkSearch" onchange="syncFeatureCheck('web-search')">
+                        <span class="name">网页搜索</span>
+                        <span class="arrow">▼</span>
+                    </div>
+                    <div class="feature-config">
+                        <div class="form-group">
+                            <label>搜索 API Key</label>
+                            <input type="password" id="searchApiKey" placeholder="搜索 API Key">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- DiDi -->
+                <div class="feature-item" data-feature="didi">
+                    <div class="feature-header" onclick="toggleFeature('didi')">
+                        <input type="checkbox" id="chkDidi" onchange="syncFeatureCheck('didi')">
+                        <span class="name">滴滴打车</span>
+                        <span class="arrow">▼</span>
+                    </div>
+                    <div class="feature-config">
+                        <div class="form-group">
+                            <label>滴滴 API Key</label>
+                            <input type="password" id="didiApiKey" placeholder="滴滴开放平台 API Key">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Local Files -->
+                <div class="feature-item" data-feature="files">
+                    <div class="feature-header" onclick="toggleFeature('files')">
+                        <input type="checkbox" id="chkFiles" onchange="syncFeatureCheck('files')">
+                        <span class="name">本地文件检索</span>
+                        <span class="arrow">▼</span>
+                    </div>
+                    <div class="feature-config">
+                        <div class="form-group">
+                            <label>允许访问的文件夹路径</label>
+                            <input type="text" id="filesAllowedRoots" placeholder="C:/Users/xxx/Desktop">
+                            <span class="hint">AI 将被允许在这个文件夹下搜索和读取文件</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Button row - outside card -->
+    <div class="btn-row" id="btnRow">
+        <button class="btn btn-secondary" id="btnPrev" onclick="prevStep()" style="display:none;">上一步</button>
+        <button class="btn btn-primary" id="btnNext" onclick="nextStep()">下一步</button>
+        <button class="btn btn-primary" id="btnSave" onclick="saveConfig()" style="display:none;">保存配置</button>
+    </div>
+</div>
+
+<script>
+// --- State ---
+let currentStep = 1;
+const totalSteps = 4;
+let loginChecked = false;
+let qrPollInterval = null;
+let qrCodeContent = null;
+
+// --- Step navigation ---
+function showStep(step) {
+    document.querySelectorAll('.step-content').forEach(el => el.classList.remove('active'));
+    document.querySelector(`.step-content[data-step="${step}"]`).classList.add('active');
+
+    // Update step indicator
+    document.querySelectorAll('.step-dot').forEach(el => {
+        const s = parseInt(el.dataset.step);
+        el.classList.remove('active', 'done');
+        if (s === step) el.classList.add('active');
+        else if (s < step) el.classList.add('done');
+    });
+    document.querySelectorAll('.step-line').forEach(el => {
+        const parts = el.dataset.step.split('-');
+        el.classList.toggle('done', parseInt(parts[1]) <= step);
+    });
+
+    // Update buttons
+    const btnPrev = document.getElementById('btnPrev');
+    const btnNext = document.getElementById('btnNext');
+    const btnSave = document.getElementById('btnSave');
+
+    btnPrev.style.display = step > 1 ? '' : 'none';
+    if (step === totalSteps) {
+        btnNext.style.display = 'none';
+        btnSave.style.display = '';
+    } else {
+        btnNext.style.display = '';
+        btnSave.style.display = 'none';
+    }
+
+    // Step 1: start QR polling
+    if (step === 1) {
+        startQrPolling();
+    } else {
+        stopQrPolling();
+    }
+
+    currentStep = step;
+}
+
+function nextStep() {
+    if (currentStep === 1) {
+        // Check if logged in
+        if (!loginChecked) {
+            checkLoginStatus().then(loggedIn => {
+                if (loggedIn) {
+                    goNext();
+                } else {
+                    alert('请先扫描二维码完成微信登录');
+                }
+            });
+            return;
+        }
+    }
+    if (currentStep === 3) {
+        // Validate required chat model fields
+        if (!document.getElementById('chatApiUrl').value.trim() ||
+            !document.getElementById('chatApiKey').value.trim() ||
+            !document.getElementById('chatModel').value.trim()) {
+            alert('请填写对话大模型的 API 地址、API Key 和模型名称');
+            return;
+        }
+    }
+    goNext();
+}
+
+function goNext() {
+    if (currentStep < totalSteps) showStep(currentStep + 1);
+}
+
+function prevStep() {
+    if (currentStep > 1) showStep(currentStep - 1);
+}
+
+// --- QR Code & Login ---
+async function startQrPolling() {
+    if (qrPollInterval) return;
+    await refreshQrCode();
+    qrPollInterval = setInterval(checkLoginStatus, 3000);
+}
+
+function stopQrPolling() {
+    if (qrPollInterval) { clearInterval(qrPollInterval); qrPollInterval = null; }
+}
+
+async function refreshQrCode() {
+    try {
+        const resp = await fetch('/api/setup/qrcode-content');
+        const data = await resp.json();
+        if (data.available && data.content !== qrCodeContent) {
+            qrCodeContent = data.content;
+            renderQrCode(data.content);
+            document.getElementById('qrPlaceholder').style.display = 'none';
+            document.getElementById('qrImage').style.display = 'block';
+        } else if (!data.available) {
+            document.getElementById('qrPlaceholder').innerHTML =
+                '<span class="spinner"></span> 正在获取二维码...';
+        }
+    } catch (e) {
+        console.error('Failed to fetch QR code:', e);
+    }
+}
+
+function renderQrCode(content) {
+    // Use the same QR rendering approach as the server side
+    // For now, request the server to render it as a data URI image
+    // We'll use the existing /ilink/qrcode endpoint's QR rendering
+    // But we need the raw image, so let's generate it client-side
+    // For simplicity, we poll the server-rendered QR
+    fetch('/ilink/qrcode')
+        .then(r => r.text())
+        .then(html => {
+            const match = html.match(/src="(data:image\/png;base64,[^"]+)"/);
+            if (match) {
+                document.getElementById('qrImage').src = match[1];
+                document.getElementById('qrPlaceholder').style.display = 'none';
+                document.getElementById('qrImage').style.display = 'block';
+            }
+        })
+        .catch(e => console.error('QR render failed:', e));
+}
+
+async function checkLoginStatus() {
+    try {
+        const resp = await fetch('/api/setup/login-status');
+        const data = await resp.json();
+        const statusEl = document.getElementById('loginStatus');
+        const qrWrapper = document.getElementById('qrWrapper');
+
+        if (data.loggedIn) {
+            loginChecked = true;
+            qrWrapper.classList.add('scanned');
+            statusEl.innerHTML = '<span class="login-success"><span class="icon">&#10003;</span> 登录成功！Bot ID: ' + escapeHtml(data.botId || '') + '</span>';
+            stopQrPolling();
+            // Auto-advance after 1.5s
+            setTimeout(() => {
+                if (currentStep === 1) goNext();
+            }, 1500);
+            return true;
+        } else {
+            loginChecked = false;
+            if (data.hasQrcode) {
+                statusEl.innerHTML = '<span class="spinner"></span> 等待扫码登录（每3秒自动检查）...';
+                // Refresh QR image
+                if (!qrCodeContent) refreshQrCode();
+                setTimeout(refreshQrCode, 500);
+            } else {
+                statusEl.innerHTML = '<span class="spinner"></span> 正在连接 iLink 服务...';
+            }
+            return false;
+        }
+    } catch (e) {
+        console.error('Login check failed:', e);
+        return false;
+    }
+}
+
+// --- Feature toggles ---
+function toggleFeature(name) {
+    const item = document.querySelector(`.feature-item[data-feature="${name}"]`);
+    const chk = item.querySelector('input[type="checkbox"]');
+    chk.checked = !chk.checked;
+    syncFeatureCheck(name);
+}
+
+function syncFeatureCheck(name) {
+    const item = document.querySelector(`.feature-item[data-feature="${name}"]`);
+    const chk = item.querySelector('input[type="checkbox"]');
+    item.classList.toggle('checked', chk.checked);
+}
+
+// --- Load existing config ---
+async function loadExistingConfig() {
+    try {
+        const resp = await fetch('/api/setup/config');
+        const data = await resp.json();
+
+        function get(path, def) {
+            const keys = path.split('.');
+            let val = data;
+            for (const k of keys) {
+                if (val == null) return def;
+                val = val[k];
+            }
+            return val != null ? val : def;
+        }
+
+        // Orchestration model (step 2)
+        const intentUrl = get('agent.ai.intent-api-url', '') || '';
+        const intentKey = get('agent.ai.intent-api-key', '') || '';
+        const intentModel = get('agent.ai.intent-model', '') || '';
+        const intentTemp = get('agent.ai.temperature', 0.7);
+        if (typeof intentUrl === 'string') document.getElementById('intentApiUrl').value = intentUrl;
+        if (typeof intentKey === 'string') document.getElementById('intentApiKey').value = intentKey;
+        if (typeof intentModel === 'string') document.getElementById('intentModel').value = intentModel;
+        if (typeof intentTemp === 'number') document.getElementById('intentTemperature').value = intentTemp;
+
+        // Chat model (step 3)
+        const chatUrl = get('agent.ai.api-url', '') || '';
+        const chatKey = get('agent.ai.api-key', '') || '';
+        const chatModel = get('agent.ai.model', '') || '';
+        if (typeof chatUrl === 'string' && chatUrl !== '请填入你的 API Key') document.getElementById('chatApiUrl').value = chatUrl;
+        if (typeof chatKey === 'string' && chatKey !== '请填入你的 API Key') document.getElementById('chatApiKey').value = chatKey;
+        if (typeof chatModel === 'string' && chatModel !== '请填入你的 API Key') document.getElementById('chatModel').value = chatModel;
+
+        // Optional features (step 4)
+        // Speech
+        const speechEnabled = get('agent.speech.enabled', false);
+        document.getElementById('chkSpeechStt').checked = !!(speechEnabled || get('agent.speech.stt.enabled', false));
+        document.getElementById('chkSpeechTts').checked = !!(speechEnabled || get('agent.speech.tts.enabled', false));
+        syncFeatureCheck('speech-stt');
+        syncFeatureCheck('speech-tts');
+        if (typeof (get('agent.speech.api-key', '')) === 'string') document.getElementById('speechApiKey').value = get('agent.speech.api-key', '');
+        if (typeof (get('agent.speech.api-url', '')) === 'string') document.getElementById('speechApiUrl').value = get('agent.speech.api-url', '');
+        if (typeof (get('agent.speech.stt.api-url', '')) === 'string') document.getElementById('sttApiUrl').value = get('agent.speech.stt.api-url', '');
+        if (typeof (get('agent.speech.stt.model', '')) === 'string') document.getElementById('sttModel').value = get('agent.speech.stt.model', 'qwen3-asr-flash');
+        if (typeof (get('agent.speech.stt.ffmpeg-path', '')) === 'string') document.getElementById('sttFfmpegPath').value = get('agent.speech.stt.ffmpeg-path', 'ffmpeg');
+        if (typeof (get('agent.speech.tts.model', '')) === 'string') document.getElementById('ttsModel').value = get('agent.speech.tts.model', 'qwen3-tts-flash');
+        if (typeof (get('agent.speech.tts.voice', '')) === 'string') document.getElementById('ttsVoice').value = get('agent.speech.tts.voice', 'Cherry');
+        const ttsRate = get('agent.speech.tts.sample-rate', 24000);
+        document.getElementById('ttsSampleRate').value = String(ttsRate);
+
+        // Image gen
+        document.getElementById('chkImageGen').checked = !!get('agent.ai.image-gen-enabled', false);
+        syncFeatureCheck('image-gen');
+        if (typeof (get('agent.ai.image-gen-api-url', '')) === 'string') document.getElementById('imageGenApiUrl').value = get('agent.ai.image-gen-api-url', '');
+        if (typeof (get('agent.ai.image-gen-api-key', '')) === 'string') document.getElementById('imageGenApiKey').value = get('agent.ai.image-gen-api-key', '');
+        if (typeof (get('agent.ai.image-gen-model', '')) === 'string') document.getElementById('imageGenModel').value = get('agent.ai.image-gen-model', 'dall-e-3');
+        if (typeof (get('agent.ai.image-gen-size', '')) === 'string') document.getElementById('imageGenSize').value = get('agent.ai.image-gen-size', '1024x1024');
+
+        // Weather/Map
+        document.getElementById('chkWeather').checked = !!get('agent.tools.weather.enabled', false);
+        syncFeatureCheck('weather');
+        if (typeof (get('agent.tools.weather.amap-key', '')) === 'string') document.getElementById('amapKey').value = get('agent.tools.weather.amap-key', '');
+        if (typeof (get('agent.tools.weather.amap-private-key', '')) === 'string') document.getElementById('amapPrivateKey').value = get('agent.tools.weather.amap-private-key', '');
+
+        // Web search
+        document.getElementById('chkSearch').checked = !!get('agent.tools.search.enabled', false);
+        syncFeatureCheck('web-search');
+        if (typeof (get('agent.tools.search.api-key', '')) === 'string') document.getElementById('searchApiKey').value = get('agent.tools.search.api-key', '');
+
+        // DiDi
+        document.getElementById('chkDidi').checked = !!get('agent.tools.didi.enabled', false);
+        syncFeatureCheck('didi');
+        if (typeof (get('agent.tools.didi.api-key', '')) === 'string') document.getElementById('didiApiKey').value = get('agent.tools.didi.api-key', '');
+
+        // Files
+        document.getElementById('chkFiles').checked = !!get('agent.tools.files.enabled', false);
+        syncFeatureCheck('files');
+        if (typeof (get('agent.tools.files.allowed-roots', '')) === 'string') document.getElementById('filesAllowedRoots').value = get('agent.tools.files.allowed-roots', '');
+
+    } catch (e) {
+        console.error('Failed to load existing config:', e);
+    }
+}
+
+// --- Save config ---
+async function saveConfig() {
+    const btnSave = document.getElementById('btnSave');
+    btnSave.disabled = true;
+    btnSave.textContent = '正在保存...';
+
+    // Build config object matching YAML structure
+    const config = {
+        agent: {
+            ai: {
+                'api-key': document.getElementById('chatApiKey').value.trim(),
+                'api-url': document.getElementById('chatApiUrl').value.trim(),
+                'model': document.getElementById('chatModel').value.trim(),
+                'temperature': parseFloat(document.getElementById('chatTemperature').value) || 0.7,
+                'max-tokens': parseInt(document.getElementById('chatMaxTokens').value) || 2000,
+            }
+        }
+    };
+
+    // Orchestration model (if configured)
+    const intentUrl = document.getElementById('intentApiUrl').value.trim();
+    const intentKey = document.getElementById('intentApiKey').value.trim();
+    const intentModel = document.getElementById('intentModel').value.trim();
+    if (intentUrl || intentKey || intentModel) {
+        config.agent.ai['intent-api-url'] = intentUrl;
+        config.agent.ai['intent-api-key'] = intentKey;
+        config.agent.ai['intent-model'] = intentModel;
+    }
+
+    // Image generation
+    if (document.getElementById('chkImageGen').checked) {
+        config.agent.ai['image-gen-enabled'] = true;
+        config.agent.ai['image-gen-api-url'] = document.getElementById('imageGenApiUrl').value.trim();
+        config.agent.ai['image-gen-api-key'] = document.getElementById('imageGenApiKey').value.trim();
+        config.agent.ai['image-gen-model'] = document.getElementById('imageGenModel').value.trim();
+        config.agent.ai['image-gen-size'] = document.getElementById('imageGenSize').value;
+    }
+
+    // Speech
+    const speechStt = document.getElementById('chkSpeechStt').checked;
+    const speechTts = document.getElementById('chkSpeechTts').checked;
+    if (speechStt || speechTts) {
+        config.agent.speech = {
+            enabled: true,
+            'api-key': document.getElementById('speechApiKey').value.trim(),
+            'api-url': document.getElementById('speechApiUrl').value.trim(),
+        };
+        if (speechStt) {
+            config.agent.speech.stt = {
+                enabled: true,
+                'api-url': document.getElementById('sttApiUrl').value.trim(),
+                model: document.getElementById('sttModel').value.trim(),
+                'ffmpeg-path': document.getElementById('sttFfmpegPath').value.trim() || 'ffmpeg'
+            };
+        }
+        if (speechTts) {
+            config.agent.speech.tts = {
+                enabled: true,
+                model: document.getElementById('ttsModel').value.trim(),
+                voice: document.getElementById('ttsVoice').value,
+                'sample-rate': parseInt(document.getElementById('ttsSampleRate').value) || 24000
+            };
+        }
+    }
+
+    // Weather / Map
+    if (document.getElementById('chkWeather').checked) {
+        if (!config.agent.tools) config.agent.tools = {};
+        config.agent.tools.weather = {
+            enabled: true,
+            'amap-key': document.getElementById('amapKey').value.trim(),
+            'amap-private-key': document.getElementById('amapPrivateKey').value.trim()
+        };
+        config.agent.tools.placeid = { enabled: true };
+        config.agent.tools.aroundsearch = { enabled: true };
+        config.agent.tools.staticmap = { enabled: true };
+        config.agent.tools.direction = { enabled: true };
+    }
+
+    // Web search
+    if (document.getElementById('chkSearch').checked) {
+        if (!config.agent.tools) config.agent.tools = {};
+        config.agent.tools.search = {
+            enabled: true,
+            'api-key': document.getElementById('searchApiKey').value.trim()
+        };
+    }
+
+    // DiDi
+    if (document.getElementById('chkDidi').checked) {
+        if (!config.agent.tools) config.agent.tools = {};
+        config.agent.tools.didi = {
+            enabled: true,
+            'api-key': document.getElementById('didiApiKey').value.trim()
+        };
+    }
+
+    // Files
+    if (document.getElementById('chkFiles').checked) {
+        if (!config.agent.tools) config.agent.tools = {};
+        config.agent.tools.files = {
+            enabled: true,
+            'allowed-roots': document.getElementById('filesAllowedRoots').value.trim()
+        };
+    }
+
+    try {
+        const resp = await fetch('/api/setup/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        const result = await resp.json();
+
+        if (result.success) {
+            // Show success state
+            document.querySelectorAll('.step-content').forEach(el => el.classList.remove('active'));
+            const card = document.getElementById('formCard');
+            card.innerHTML = `
+                <div style="text-align:center;padding:20px 0;">
+                    <div style="font-size:56px;margin-bottom:16px;">&#10003;</div>
+                    <div class="step-title" style="margin-bottom:12px;">配置完成！</div>
+                    <div class="step-desc" style="margin-bottom:24px;">
+                        配置已保存到 <code style="background:#f5f5f5;padding:2px 6px;border-radius:4px;">${escapeHtml(result.path || 'config/application-local.yaml')}</code>
+                    </div>
+                    <div class="alert alert-info" style="text-align:left;">
+                        <strong>下一步：</strong><br>
+                        1. 重启应用使新配置生效<br>
+                        2. 重启后访问 <code>http://localhost:8080</code>，首次已配置完成，之后直接扫码即可<br>
+                        3. 在微信中给 Bot 发消息即可使用<br><br>
+                        <strong>启动命令：</strong><br>
+                        <code>java -jar wechat-ai.jar --spring.config.additional-location=optional:file:./config/application-local.yaml</code>
+                    </div>
+                </div>
+            `;
+            document.getElementById('btnRow').style.display = 'none';
+        } else {
+            alert('保存失败：' + (result.message || '未知错误'));
+        }
+    } catch (e) {
+        alert('保存失败：' + e.message);
+    } finally {
+        btnSave.disabled = false;
+        btnSave.textContent = '保存配置';
+    }
+}
+
+function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+// --- Init ---
+document.addEventListener('DOMContentLoaded', () => {
+    showStep(1);
+    loadExistingConfig();
+});
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => stopQrPolling());
+</script>
+</body>
+</html>

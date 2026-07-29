@@ -1,12 +1,13 @@
 package com.youkeda.project.wechatproject.bot.tool;
 
 import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentResult;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentTask;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.ChatAgent;
+import com.youkeda.project.wechatproject.bot.agent.AgentResult;
+import com.youkeda.project.wechatproject.bot.agent.AgentTask;
+import com.youkeda.project.wechatproject.bot.agent.chat.ChatAgent;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.SystemTools;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolRuntime;
+import com.youkeda.project.wechatproject.bot.tool.travel.WeatherTools;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.ai.chat.client.ChatClient;
@@ -56,9 +57,16 @@ class ToolServiceTests {
     @Test
     void wiresProjectToolsWithoutRequiringOuterLoopChanges() {
         assertThat(toolRuntime.tools()).hasAtLeastOneElementOfType(SystemTools.class);
-        assertThat(toolRuntime.tools()).hasAtLeastOneElementOfType(WeatherTools.class);
         assertThat(toolRuntime.asSpringAiTools()).isNotEmpty();
-        assertThat(context.getBeansOfType(ToolChatClientFactory.class)).hasSize(1);
+        assertThat(context.getBeansOfType(ToolChatClientFactory.class)).hasSize(3);
+    }
+
+    @Test
+    void travelToolRuntimeHasWeatherMapAndDiDiTools() {
+        @SuppressWarnings("unchecked")
+        var travelRuntime = (ToolService.ToolRuntime) context.getBean("travelToolRuntime");
+        assertThat(travelRuntime.tools()).hasAtLeastOneElementOfType(WeatherTools.class);
+        assertThat(travelRuntime.tools()).isNotEmpty();
     }
 
     @Test
