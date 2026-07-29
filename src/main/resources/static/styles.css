@@ -524,11 +524,17 @@ h3 {
 
 .voice-wave span {
     width: 3px;
-    height: calc(7px + (var(--i) % 5) * 3px);
+    height: 13px;
     border-radius: 999px;
     background: var(--primary);
     opacity: 0.58;
 }
+
+.voice-wave span:nth-child(5n + 1) { height: 7px; }
+.voice-wave span:nth-child(5n + 2) { height: 10px; }
+.voice-wave span:nth-child(5n + 3) { height: 13px; }
+.voice-wave span:nth-child(5n + 4) { height: 16px; }
+.voice-wave span:nth-child(5n) { height: 19px; }
 
 .voice-bubble.playing .voice-wave span {
     animation: voicePulse 0.86s ease-in-out infinite;
