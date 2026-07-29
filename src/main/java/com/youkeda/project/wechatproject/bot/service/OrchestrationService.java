@@ -34,6 +34,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
 import java.io.IOException;
@@ -55,7 +56,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -150,6 +155,10 @@ public final class OrchestrationService {
 
     public interface ConversationMemory {
         List<ChatRequest.Message> getHistory(String userId);
+
+        default List<ChatRequest.Message> getHistory(String userId, String userMessage) {
+            return getHistory(userId);
+        }
 
         void append(String userId, String userMessage, String assistantReply);
 
@@ -337,29 +346,9 @@ public final class OrchestrationService {
         }
     }
 
-    public static class AgentResult {
+    public record AgentResult(String taskId, Status status, Object output, String rawOutput, String errorMessage) {
 
         public enum Status { SUCCESS, FAILED }
-
-        private final String taskId;
-        private final Status status;
-        private final Object output;
-        private final String rawOutput;
-        private final String errorMessage;
-
-        public AgentResult(String taskId, Status status, Object output, String rawOutput, String errorMessage) {
-            this.taskId = taskId;
-            this.status = status;
-            this.output = output;
-            this.rawOutput = rawOutput;
-            this.errorMessage = errorMessage;
-        }
-
-        public String taskId() { return taskId; }
-        public Status status() { return status; }
-        public Object output() { return output; }
-        public String rawOutput() { return rawOutput; }
-        public String errorMessage() { return errorMessage; }
 
         public static AgentResult success(String taskId, Object output, String rawOutput) {
             return new AgentResult(taskId, Status.SUCCESS, output, rawOutput, null);
@@ -370,32 +359,19 @@ public final class OrchestrationService {
         }
     }
 
-    public static class AgentTask {
-
-        private final String taskId;
-        private final String agentType;
-        private final String instruction;
-        private final Map<String, Object> parameters;
+    public record AgentTask(String taskId, String agentType, String instruction, Map<String, Object> parameters) {
 
         public AgentTask(String agentType, String instruction, Map<String, Object> parameters) {
             this(UUID.randomUUID().toString().substring(0, 8), agentType, instruction, parameters);
         }
 
-        private AgentTask(String taskId, String agentType, String instruction, Map<String, Object> parameters) {
-            this.taskId = taskId;
-            this.agentType = agentType;
-            this.instruction = instruction;
-            this.parameters = parameters != null ? Map.copyOf(parameters) : Map.of();
+        public AgentTask {
+            parameters = parameters != null ? Map.copyOf(parameters) : Map.of();
         }
 
         public AgentTask withParameters(Map<String, Object> newParameters) {
             return new AgentTask(taskId, agentType, instruction, newParameters);
         }
-
-        public String taskId() { return taskId; }
-        public String agentType() { return agentType; }
-        public String instruction() { return instruction; }
-        public Map<String, Object> parameters() { return parameters; }
     }
 
     public interface AgentUnit {
@@ -414,6 +390,16 @@ public final class OrchestrationService {
         private final ChatClient toolChatClient;
         private final String toolCategories;
         private final String skillsSummary;
+        private static final String TOOL_USE_RULES = """
+                Tool use rules:
+                - Current application datetime: %s.
+                - For news, hot topics, latest updates, today/yesterday/current/recent events, or any time-sensitive facts, you MUST call tools before answering.
+                - Dynamic in-platform rankings/feeds/lists MUST use Browser Agent tools, not web_search. Examples: Bilibili/B站 hot videos or ranking pages, Douyin/Xiaohongshu/Weibo trending lists, site home feeds, and any request that needs opening a platform page, scrolling, clicking, or extracting live page content.
+                - For Bilibili/B站 hot video requests, start with browser_navigate to https://www.bilibili.com/v/popular/all, then use browser_get_content and browser_scroll as needed. Do not claim that no API exists before attempting the browser tools.
+                - 【新闻专用规则】新闻查询（今日新闻、科技新闻、最新资讯等）必须且只能优先调用 search_news 工具。科技新闻用 type=tech，综合新闻不传 type。pageSize 默认 10。严禁跳过 search_news 直接使用 web_search 查新闻。
+                - 仅当 search_news 返回空结果或明确报错时，才可降级使用 web_search 作为备选。
+                - Do not answer current/news/latest requests from model memory alone.
+                """;
 
         public ChatAgent(AiModelClient chatClient) {
             this(chatClient, null, null, "", "");
@@ -462,6 +448,10 @@ public final class OrchestrationService {
             if (hasAutomationTools) {
                 desc += " Can create/manage reminders, timers, alarms, recurring reminders, and schedule items.";
             }
+            boolean hasBrowserTools = toolCategories.contains("browser");
+            if (hasBrowserTools) {
+                desc += " Can control a real browser (headless Chromium) to navigate websites, click elements, type into forms, scroll pages, extract content, take screenshots, and execute JavaScript. Supports multi-step web interactions for complex tasks like searching, form filling, data extraction, and web automation.";
+            }
             List<String> strengths = new ArrayList<>(List.of("dialogue", "writing", "analysis", "vision", "runtime-tools"));
             if (hasMapTools) {
                 strengths.addAll(List.of("place-search", "nearby-search", "route-planning", "map-navigation", "geocoding"));
@@ -471,6 +461,9 @@ public final class OrchestrationService {
             }
             if (hasAutomationTools) {
                 strengths.addAll(List.of("reminder", "timer", "alarm", "schedule", "recurring-reminder"));
+            }
+            if (hasBrowserTools) {
+                strengths.addAll(List.of("web-automation", "browser-control", "web-scraping", "form-filling", "screenshot"));
             }
             return new AgentCapability(
                     "chat-generation",
@@ -518,22 +511,98 @@ public final class OrchestrationService {
                         .call()
                         .content();
             } catch (RuntimeException e) {
-                log.warn("ChatAgent tool loop failed, falling back to legacy chat client: {}", e.getMessage());
+                if (isNetworkAccessFailure(e)) {
+                    log.warn("ChatAgent tool loop failed because the AI endpoint is unreachable: {}", rootErrorMessage(e));
+                    throw new IOException("AI 服务网络不可达：" + rootErrorMessage(e), e);
+                }
+                if (isBlankToolNameFailure(e)) {
+                    log.warn("ChatAgent tool loop failed because the AI endpoint returned an invalid blank tool name: {}",
+                            rootErrorMessage(e));
+                    return chatClient.chatStream(toolLoopFailureFallbackInstruction(instruction), imageUrls, history);
+                }
+                if (isTruncatedToolArgumentsFailure(e)) {
+                    log.warn("ChatAgent tool loop failed because the AI endpoint returned truncated tool arguments: {}",
+                            rootErrorMessage(e));
+                    return chatClient.chatStream(toolLoopFailureFallbackInstruction(instruction), imageUrls, history);
+                }
+                log.warn("ChatAgent tool loop failed, falling back to legacy chat client: {}", e.getMessage(), e);
                 return chatClient.chatStream(instruction, imageUrls, history);
             }
+        }
+
+        private static boolean isNetworkAccessFailure(Throwable e) {
+            for (Throwable current = e; current != null; current = current.getCause()) {
+                if (current instanceof ResourceAccessException
+                        || current instanceof java.net.ConnectException
+                        || current instanceof java.nio.channels.UnresolvedAddressException
+                        || current instanceof java.net.UnknownHostException) {
+                    return true;
+                }
+                String name = current.getClass().getName();
+                String message = current.getMessage();
+                if (name.contains("ResourceAccessException")
+                        || name.contains("UnresolvedAddressException")
+                        || (message != null && message.contains("I/O error on POST request"))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static boolean isBlankToolNameFailure(Throwable e) {
+            for (Throwable current = e; current != null; current = current.getCause()) {
+                String message = current.getMessage();
+                if (current instanceof IllegalArgumentException
+                        && message != null
+                        && message.contains("toolName cannot be null or empty")) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static boolean isTruncatedToolArgumentsFailure(Throwable e) {
+            for (Throwable current = e; current != null; current = current.getCause()) {
+                String message = current.getMessage();
+                if (message != null
+                        && (message.contains("Conversion from JSON")
+                         || message.contains("Unexpected end-of-input"))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static String toolLoopFailureFallbackInstruction(String instruction) {
+            return (instruction != null ? instruction : "") + """
+
+                    System note: The Spring AI tool loop failed before any tool could run because the AI endpoint returned a tool call with an empty tool name. Do not claim browser, search, or other runtime tools are unavailable, and do not claim you used them successfully. Tell the user the live tool action could not be completed due to this tool-call compatibility error, then provide any non-live guidance separately.
+                    """;
+        }
+
+        private static String rootErrorMessage(Throwable e) {
+            Throwable current = e;
+            while (current.getCause() != null) {
+                current = current.getCause();
+            }
+            String message = current.getMessage();
+            return current.getClass().getSimpleName() + (message == null || message.isBlank() ? "" : ": " + message);
         }
 
         private List<Message> toSpringAiMessages(String instruction, List<String> imageUrls,
                                                   List<ChatRequest.Message> history) {
             List<Message> messages = new ArrayList<>();
             String systemPrompt = agentProperties != null ? agentProperties.getSystemPrompt() : null;
+            String toolUseRules = String.format(TOOL_USE_RULES, java.time.ZonedDateTime.now());
             if (systemPrompt != null && !systemPrompt.isBlank()) {
                 if (!skillsSummary.isEmpty()) {
                     systemPrompt = systemPrompt + "\n" + skillsSummary;
                 }
-                messages.add(new SystemMessage(systemPrompt));
+                messages.add(new SystemMessage(systemPrompt + "\n\n" + toolUseRules));
             } else if (!skillsSummary.isEmpty()) {
-                messages.add(new SystemMessage(skillsSummary));
+                messages.add(new SystemMessage(skillsSummary + "\n\n" + toolUseRules));
+            } else {
+                messages.add(new SystemMessage(toolUseRules));
             }
             if (history != null && !history.isEmpty()) {
                 for (ChatRequest.Message historyMessage : history) {
@@ -781,6 +850,8 @@ public final class OrchestrationService {
         private int maxLoops = 5;
         private boolean clarificationEnabled = true;
         private boolean reflectionEnabled = true;
+        private boolean fastChatEnabled = false;
+        private int fastChatMaxChars = 240;
 
         public int getMaxLoops() { return maxLoops; }
         public void setMaxLoops(int maxLoops) { this.maxLoops = maxLoops; }
@@ -790,6 +861,12 @@ public final class OrchestrationService {
 
         public boolean isReflectionEnabled() { return reflectionEnabled; }
         public void setReflectionEnabled(boolean reflectionEnabled) { this.reflectionEnabled = reflectionEnabled; }
+
+        public boolean isFastChatEnabled() { return fastChatEnabled; }
+        public void setFastChatEnabled(boolean fastChatEnabled) { this.fastChatEnabled = fastChatEnabled; }
+
+        public int getFastChatMaxChars() { return fastChatMaxChars; }
+        public void setFastChatMaxChars(int fastChatMaxChars) { this.fastChatMaxChars = fastChatMaxChars; }
     }
 
     public static class TaskScratchpad {
@@ -971,6 +1048,14 @@ public final class OrchestrationService {
                   * Dynamic content ("X点帮我查天气", "明天X点搜新闻", "X点帮我生成XX") → tell CHAT: "创建一个LLM_TASK定时任务，到期时执行：查询天气/搜索新闻/生成内容。不要现在查询，让定时任务在触发时实时查询。"
                 ⚠️ NEVER tell CHAT to "query now and put the result in the reminder text" for weather/search/news tasks. This produces stale data. Tell CHAT to create an LLM_TASK instead.
 
+                Browser / Web browsing routing rules (CRITICAL):
+                - When the user asks to open a website, browse a web page, search something on a website, fill a web form, take a webpage screenshot, scrape web content, or any other browser-based task, you MUST route to CHAT. CHAT has internal browser tools (browser_navigate, browser_click, browser_type, browser_get_content, browser_screenshot, browser_scroll, browser_go_back, browser_execute_js) that control a real browser.
+                - Dynamic in-platform rankings/feeds/lists MUST route to CHAT for Browser Agent, not completed and not generic web_search. Examples: "B站今日热门视频", "bilibili热门榜", "抖音热榜", "小红书热门", "微博热搜", "YouTube trending", or any platform page that requires live browsing/extraction.
+                - For Bilibili hot video requests, the CHAT instruction should explicitly say to use Browser Agent and begin from https://www.bilibili.com/v/popular/all, then extract titles/links/metadata from the live page. Do NOT say there is no API before Browser Agent is attempted.
+                - Explicit examples that MUST go to CHAT: "打开百度搜索XX", "帮我看看这个网页", "去淘宝搜XX", "帮我填一下这个表单", "打开XX网站截图", "登录XX网站", "在XX网站搜索YY", "帮我查一下这个网页上的信息", "打开XX", "浏览XX网站", any request involving visiting, browsing, interacting with, or extracting information from websites.
+                - Do NOT return completed for these queries — CHAT must handle them via its browser tool loop.
+                - The CHAT agent can navigate, click, type, scroll, extract content, take screenshots, and execute JavaScript on web pages. It can perform multi-step web interactions to accomplish complex tasks.
+
                 DiDi Taxi / Ride-hailing routing rules (CRITICAL):
                 - When the user asks to hail a taxi, call a car, or request a ride, you MUST route to CHAT. CHAT has internal DiDi tools (didi_taxi_estimate, didi_taxi_create_order, etc.).
                 - CRITICAL: The DiDi taxi flow requires user confirmation on car type before creating an order. Your plan MUST only route ONE task to CHAT — CHAT will handle price estimation internally and present car options to the user. Do NOT plan a create_order task; the order happens in a separate conversation turn after the user explicitly selects a car type.
@@ -1102,6 +1187,7 @@ public final class OrchestrationService {
             }
 
             StringBuilder userContent = new StringBuilder();
+            userContent.append("[current application datetime] ").append(java.time.ZonedDateTime.now()).append("\n");
             userContent.append(request.text() != null ? request.text() : "");
             if (!request.imageBase64Urls().isEmpty()) {
                 userContent.append("\n[user attached images: ").append(request.imageBase64Urls().size()).append("]");
@@ -1127,6 +1213,7 @@ public final class OrchestrationService {
 
         private OrchestrationResult doReflect(TaskScratchpad scratchpad, UserRequest originalRequest) {
             StringBuilder reflectContent = new StringBuilder();
+            reflectContent.append("[current application datetime] ").append(java.time.ZonedDateTime.now()).append("\n\n");
             reflectContent.append("=== ORIGINAL USER REQUEST ===\n");
             reflectContent.append(originalRequest.text() != null ? originalRequest.text() : "");
             if (!originalRequest.imageBase64Urls().isEmpty()) {
@@ -1368,6 +1455,9 @@ public final class OrchestrationService {
         private final int maxLoops;
         private final boolean clarificationEnabled;
         private final boolean reflectionEnabled;
+        private final boolean fastChatEnabled;
+        private final int fastChatMaxChars;
+        private final ExecutorService taskExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
         public MessageRouter(OrchestratorAgent orchestrator, AgentRegistry registry, ConversationMemory memory,
                              VoiceCatalog voiceCatalog, DocumentService documentService,
@@ -1380,6 +1470,8 @@ public final class OrchestrationService {
             this.maxLoops = Math.max(1, orchestratorProperties.getMaxLoops());
             this.clarificationEnabled = orchestratorProperties.isClarificationEnabled();
             this.reflectionEnabled = orchestratorProperties.isReflectionEnabled();
+            this.fastChatEnabled = orchestratorProperties.isFastChatEnabled();
+            this.fastChatMaxChars = Math.max(1, orchestratorProperties.getFastChatMaxChars());
         }
 
         public ModelReply route(String userId, String text, List<String> imageBase64Urls) throws IOException {
@@ -1387,7 +1479,7 @@ public final class OrchestrationService {
             lock.lock();
             DiDiTaxiTools.setCurrentUser(userId);
             try {
-            List<ChatRequest.Message> history = memory != null ? memory.getHistory(userId) : List.of();
+            List<ChatRequest.Message> history = memory != null ? memory.getHistory(userId, text) : List.of();
             ImageMemory imageMemory = imageBase64Urls.isEmpty()
                     ? resolveImageMemory(userId)
                     : ImageMemory.empty();
@@ -1406,6 +1498,10 @@ public final class OrchestrationService {
 
             OrchestrationResult result = specialCasePlan(request);
             if (result == null) {
+                ModelReply fastReply = tryFastChat(userId, request);
+                if (fastReply != null) {
+                    return fastReply;
+                }
                 result = orchestrator.plan(request);
             }
 
@@ -1432,23 +1528,51 @@ public final class OrchestrationService {
             while (result.status() == OrchestrationResult.Status.EXECUTE && loops < maxLoops) {
                 loops++;
 
-                for (AgentTask task : result.tasks()) {
-                    AgentTask executableTask = hydrateTask(request, result.scratchpad(), task);
+                List<AgentTask> tasks = result.tasks();
+                TaskScratchpad loopScratchpad = result.scratchpad();
+                if (tasks.size() <= 1 || hasTaskDependencies(tasks)) {
+                    for (AgentTask task : tasks) {
+                        AgentTask executableTask = hydrateTask(request, loopScratchpad, task);
+                        try {
+                            AgentUnit worker = registry.get(executableTask.agentType());
+                            AgentResult agentResult = worker.execute(executableTask);
+                            loopScratchpad.record(executableTask, agentResult);
+                            log.info("task executed: agent={}, status={}, taskId={}",
+                                    executableTask.agentType(), agentResult.status(), executableTask.taskId());
+                        } catch (Exception e) {
+                            log.error("task execution failed: agent={}, taskId={}, error={}",
+                                    executableTask.agentType(), executableTask.taskId(), e.getMessage());
+                            loopScratchpad.record(executableTask,
+                                    AgentResult.failed(executableTask.taskId(), e.getMessage()));
+                        }
+                    }
+                } else {
+                    @SuppressWarnings("unchecked")
+                    CompletableFuture<Void>[] futures = tasks.stream()
+                            .map(task -> CompletableFuture.runAsync(() -> {
+                                AgentTask executableTask = hydrateTask(request, loopScratchpad, task);
+                                try {
+                                    AgentUnit worker = registry.get(executableTask.agentType());
+                                    AgentResult agentResult = worker.execute(executableTask);
+                                    loopScratchpad.record(executableTask, agentResult);
+                                    log.info("task executed: agent={}, status={}, taskId={}",
+                                            executableTask.agentType(), agentResult.status(), executableTask.taskId());
+                                } catch (Exception e) {
+                                    log.error("task execution failed: agent={}, taskId={}, error={}",
+                                            executableTask.agentType(), executableTask.taskId(), e.getMessage());
+                                    loopScratchpad.record(executableTask,
+                                            AgentResult.failed(executableTask.taskId(), e.getMessage()));
+                                }
+                            }, taskExecutor))
+                            .toArray(CompletableFuture[]::new);
                     try {
-                        AgentUnit worker = registry.get(executableTask.agentType());
-                        AgentResult agentResult = worker.execute(executableTask);
-                        result.scratchpad().record(executableTask, agentResult);
-                        log.info("task executed: agent={}, status={}, taskId={}",
-                                executableTask.agentType(), agentResult.status(), executableTask.taskId());
+                        CompletableFuture.allOf(futures).get(120, TimeUnit.SECONDS);
                     } catch (Exception e) {
-                        log.error("task execution failed: agent={}, taskId={}, error={}",
-                                executableTask.agentType(), executableTask.taskId(), e.getMessage());
-                        result.scratchpad().record(executableTask,
-                                AgentResult.failed(executableTask.taskId(), e.getMessage()));
+                        log.error("parallel task execution interrupted: {}", e.getMessage());
                     }
                 }
 
-                if (!reflectionEnabled) {
+                if (!reflectionEnabled || isSingleChatSuccess(result)) {
                     break;
                 }
 
@@ -1486,7 +1610,7 @@ public final class OrchestrationService {
             try {
                 LocalFileTools.getAndClearPreparedFile();
                 String text = scheduledTaskPrompt(scheduledRequest);
-                List<ChatRequest.Message> history = memory != null ? memory.getHistory(userId) : List.of();
+                List<ChatRequest.Message> history = memory != null ? memory.getHistory(userId, text) : List.of();
                 UserRequest request = new UserRequest(
                         userId,
                         text,
@@ -1529,7 +1653,7 @@ public final class OrchestrationService {
                         }
                     }
 
-                    if (!reflectionEnabled) {
+                    if (!reflectionEnabled || isSingleChatSuccess(result)) {
                         break;
                     }
 
@@ -1548,6 +1672,56 @@ public final class OrchestrationService {
             } finally {
                 lock.unlock();
             }
+        }
+
+        private ModelReply tryFastChat(String userId, UserRequest request) {
+            if (!shouldUseFastChat(request)) {
+                return null;
+            }
+            TaskScratchpad scratchpad = new TaskScratchpad();
+            AgentTask task = new AgentTask("CHAT", request.text() != null ? request.text() : "",
+                    Map.of("fast_path", true));
+            AgentTask executableTask = hydrateTask(request, scratchpad, task);
+            try {
+                AgentUnit worker = registry.get("CHAT");
+                AgentResult agentResult = worker.execute(executableTask);
+                scratchpad.record(executableTask, agentResult);
+                OrchestrationResult result = OrchestrationResult.builder()
+                        .status(OrchestrationResult.Status.EXECUTE)
+                        .reasoning("fast chat path")
+                        .tasks(List.of(executableTask))
+                        .scratchpad(scratchpad)
+                        .build();
+                ModelReply finalReply = buildFinalReply(result);
+                persistMemory(userId, request.text(), result, finalReply);
+                return finalReply;
+            } catch (Exception e) {
+                log.warn("fast chat path failed, falling back to orchestrator: {}", e.getMessage());
+                return null;
+            }
+        }
+
+        private boolean shouldUseFastChat(UserRequest request) {
+            if (!fastChatEnabled || !registry.contains("CHAT")) {
+                return false;
+            }
+            String text = request.text() == null ? "" : request.text().trim();
+            if (text.isBlank() || text.length() > fastChatMaxChars || !request.imageBase64Urls().isEmpty()) {
+                return false;
+            }
+            return !requiresOrchestration(text.toLowerCase(Locale.ROOT));
+        }
+
+        private static boolean requiresOrchestration(String text) {
+            return containsAny(text,
+                    "画", "绘图", "图片生成", "生成图片", "生成一张", "文生图", "海报", "插画",
+                    "朗读", "读出来", "念出来", "语音", "配音", "音频", "声音",
+                    "提醒", "闹钟", "定时", "日程", "每天", "每周", "明天", "后天", "分钟后", "小时后",
+                    "打车", "叫车", "出租车", "网约车",
+                    "文件", "导出", "保存", "下载", "docx", "word", "csv", "excel", "报告",
+                    "天气", "新闻", "热搜", "最新", "今天", "昨天", "搜索", "查一下", "查询",
+                    "附近", "路线", "导航", "怎么走", "地址", "地图",
+                    "然后", "再帮我", "同时", "并且", "顺便");
         }
 
         private OrchestrationResult specialCasePlan(UserRequest request) {
@@ -1647,6 +1821,36 @@ public final class OrchestrationService {
             sb.append("- Do not say you will do it later; this is already the trigger moment.\n");
             sb.append("- If required information is missing, return a concise failure reason instead of asking the user a clarification question.\n");
             return sb.toString();
+        }
+
+        private static boolean isSingleChatSuccess(OrchestrationResult result) {
+            List<AgentTask> tasks = result.tasks();
+            if (tasks.size() != 1) {
+                return false;
+            }
+            AgentTask task = tasks.get(0);
+            if (!"CHAT".equals(task.agentType())) {
+                return false;
+            }
+            TaskScratchpad.ExecutionRecord lastRecord = null;
+            for (TaskScratchpad.ExecutionRecord r : result.scratchpad().records()) {
+                if (r.task().taskId().equals(task.taskId())) {
+                    lastRecord = r;
+                }
+            }
+            return lastRecord != null && lastRecord.result().status() == AgentResult.Status.SUCCESS;
+        }
+
+        private static boolean hasTaskDependencies(List<AgentTask> tasks) {
+            for (AgentTask task : tasks) {
+                if ("SPEECH_GEN".equals(task.agentType())) {
+                    String instruction = task.instruction();
+                    if (instruction != null && instruction.contains("{{LAST_CHAT_TEXT}}")) {
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
 
         private static OrchestrationResult chatOnlyPlan(String text, TaskScratchpad scratchpad) {
@@ -1892,7 +2096,22 @@ public final class OrchestrationService {
             if (audio != null) {
                 return ModelReply.voice(audio.bytes(), audio.format(), audio.durationMs(), audio.sampleRate());
             }
+            String failureMessage = lastFailureMessage(scratchpad);
+            if (failureMessage != null && !failureMessage.isBlank()) {
+                return ModelReply.text("任务执行失败：" + failureMessage);
+            }
             return ModelReply.text(textReply != null ? textReply : "task completed");
+        }
+
+        private static String lastFailureMessage(TaskScratchpad scratchpad) {
+            List<TaskScratchpad.ExecutionRecord> records = scratchpad.records();
+            for (int i = records.size() - 1; i >= 0; i--) {
+                AgentResult result = records.get(i).result();
+                if (result.status() == AgentResult.Status.FAILED && result.errorMessage() != null) {
+                    return result.errorMessage();
+                }
+            }
+            return null;
         }
 
         private static ParsedFileResult extractFileMarkers(String text) {

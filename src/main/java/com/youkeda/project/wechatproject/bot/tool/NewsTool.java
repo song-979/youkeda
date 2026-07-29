@@ -9,14 +9,10 @@ import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.ArrayList;
 import java.util.List;
 
 @Component
 public class NewsTool implements ToolService.ProjectTool {
-
-    @Override
-    public String category() { return "information"; }
 
     private static final Logger log = LoggerFactory.getLogger(NewsTool.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
@@ -41,16 +37,23 @@ public class NewsTool implements ToolService.ProjectTool {
         this.restTemplate = restTemplate;
     }
 
+    @Override
+    public String category() {
+        return "information";
+    }
+
     @Tool(name = "search_news",
-          description = "【新闻专用】搜索最新新闻资讯。当用户询问新闻、热点、最新消息、今日要闻等新闻类内容时，必须优先使用此工具而非 web_search。可按类别筛选：mobile(手机), sports(体育), game(游戏), tech(科技), entertainment(娱乐), finance(财经), auto(汽车), science(科学), education(教育), military(军事), health(健康), travel(旅游), food(美食), house(房产), pet(宠物), other(其他)。不填类别则返回综合新闻。")
+            description = "【新闻专用】查询最新新闻资讯。用户询问新闻、热点、最新消息、今日要闻时必须优先调用本工具；科技新闻使用 type=tech。可选类别：mobile, sports, game, tech, entertainment, finance, auto, science, education, military, health, travel, food, house, pet, other。")
     public String searchNews(
-            @ToolParam(description = "新闻类别，如 mobile/sports/game/tech 等。不填则返回综合新闻。")
+            @ToolParam(description = "新闻类别，例如 tech 表示科技新闻；不传则返回综合新闻。")
             String type,
-            @ToolParam(description = "返回条数，默认10，最大20。")
+            @ToolParam(description = "返回条数，默认 10，最大 20。")
             Integer pageSize) {
         try {
             int size = normalizePageSize(pageSize);
             String finalType = normalizeType(type);
+
+            log.info("search_news invoked: type={}, pageSize={}", finalType, size);
 
             StringBuilder url = new StringBuilder(NEWS_API_URL)
                     .append("?key=").append(API_KEY)
@@ -69,7 +72,7 @@ public class NewsTool implements ToolService.ProjectTool {
             }
 
             JsonNode list = root.path("result").path("list");
-            if (!list.isArray() || list.size() == 0) {
+            if (!list.isArray() || list.isEmpty()) {
                 return "未找到匹配的新闻资讯。";
             }
 
@@ -118,10 +121,7 @@ public class NewsTool implements ToolService.ProjectTool {
             return null;
         }
         String trimmed = type.trim().toLowerCase();
-        if (VALID_TYPES.contains(trimmed)) {
-            return trimmed;
-        }
-        return null;
+        return VALID_TYPES.contains(trimmed) ? trimmed : null;
     }
 
     private static int normalizePageSize(Integer pageSize) {

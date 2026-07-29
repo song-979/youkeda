@@ -3,6 +3,9 @@ package com.youkeda.project.wechatproject.bot.tool;
 import org.springframework.web.util.UriComponents;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -11,15 +14,14 @@ import java.util.TreeMap;
 
 final class AmapSignUtil {
 
+    private static final Logger log = LoggerFactory.getLogger(AmapSignUtil.class);
+
     private AmapSignUtil() {
     }
 
-    /**
-     * Appends the Amap digital signature (sig) to the UriComponentsBuilder.
-     * Must be called before build() / encode() to sign raw parameter values.
-     */
     static UriComponentsBuilder appendSign(UriComponentsBuilder builder, String privateKey) {
         if (privateKey == null || privateKey.isBlank()) {
+            log.warn("AmapSignUtil: privateKey is null or blank, no sig will be added");
             return builder;
         }
 
@@ -41,6 +43,9 @@ final class AmapSignUtil {
         raw.append(privateKey);
 
         String sig = md5(raw.toString());
+        log.info("AmapSignUtil signature computed: rawString={}, sig={}",
+                raw.substring(0, Math.min(200, raw.length())) + "...",
+                sig);
         return builder.queryParam("sig", sig);
     }
 

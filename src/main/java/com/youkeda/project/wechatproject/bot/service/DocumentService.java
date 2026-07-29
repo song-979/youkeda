@@ -1,6 +1,7 @@
 package com.youkeda.project.wechatproject.bot.service;
 
 import com.youkeda.project.wechatproject.bot.service.VoiceService.SpeechToTextClient;
+import com.youkeda.project.wechatproject.bot.tool.TextDecodeUtil;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -22,7 +23,6 @@ import org.slf4j.LoggerFactory;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -147,13 +147,6 @@ public class DocumentService {
     private interface Parser {
         Set<String> supportedExtensions();
 
-        default boolean supports(String fileExtension) {
-            if (fileExtension == null || fileExtension.isBlank()) {
-                return false;
-            }
-            return supportedExtensions().contains(fileExtension.toLowerCase(Locale.ROOT));
-        }
-
         ParseResult parse(byte[] bytes, String fileName) throws IOException;
     }
 
@@ -173,41 +166,9 @@ public class DocumentService {
 
         @Override
         public ParseResult parse(byte[] bytes, String fileName) {
-            String text = decodeText(bytes);
+            String text = TextDecodeUtil.decode(bytes);
             log.info("txt parsed: '{}' -> {} chars", fileName, text.length());
             return new ParseResult(text, List.of(), fileName);
-        }
-
-        static String decodeText(byte[] bytes) {
-            try {
-                String text = new String(bytes, StandardCharsets.UTF_8);
-                if (!looksCorrupted(text)) {
-                    return text;
-                }
-            } catch (Exception ignored) {
-            }
-
-            try {
-                String text = new String(bytes, Charset.forName("GBK"));
-                log.debug("decoded as GBK: {} chars", text.length());
-                return text;
-            } catch (Exception e) {
-                log.warn("GBK decode failed, falling back to UTF-8 with replacement");
-                return new String(bytes, StandardCharsets.UTF_8);
-            }
-        }
-
-        private static boolean looksCorrupted(String text) {
-            if (text.length() < 50) {
-                return false;
-            }
-            int replacementCount = 0;
-            for (int i = 0; i < Math.min(text.length(), 200); i++) {
-                if (text.charAt(i) == '\uFFFD') {
-                    replacementCount++;
-                }
-            }
-            return replacementCount > 3;
         }
     }
 

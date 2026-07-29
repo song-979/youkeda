@@ -6,6 +6,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.openai.api.OpenAiApi.ChatCompletionRequest.ToolChoiceBuilder;
+import org.springframework.ai.support.ToolCallbacks;
+import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,6 +26,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -136,8 +141,9 @@ public class ToolService {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.tools.weather", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public WeatherTools weatherTools(WeatherTools.WeatherProperties weatherProperties) {
-        return new WeatherTools(weatherProperties);
+    public WeatherTools weatherTools(@Value("${agent.tools.weather.amap-key}") String amapKey,
+                                     @Value("${agent.tools.weather.amap-private-key:}") String amapPrivateKey) {
+        return new WeatherTools(amapKey, amapPrivateKey);
     }
 
     @Bean
@@ -194,6 +200,7 @@ public class ToolService {
         private static final Map<String, String> CATEGORY_LABELS = Map.of(
                 "information", "信息查询（时间、天气、搜索）",
                 "web_content", "网页内容获取",
+                "browser", "浏览器操控（打开网页、点击元素、输入文字、截图、执行JS）",
                 "media_generation", "媒体生成（GIF表情）",
                 "automation", "定时提醒与日程（创建提醒、定时任务、日常安排、闹钟）",
                 "local_files", "本地文件检索、读取和发送",
@@ -203,10 +210,13 @@ public class ToolService {
         );
 
         private final List<ProjectTool> tools;
+        private final List<ToolCallback> toolCallbacks;
 
         public ToolRuntime(List<ProjectTool> tools) {
             this.tools = tools != null ? List.copyOf(tools) : List.of();
-            log.info("Spring AI tool runtime initialized with {} tool group(s)", this.tools.size());
+            this.toolCallbacks = createToolCallbacks(this.tools);
+            log.info("Spring AI tool runtime initialized with {} tool group(s), {} callable tool(s)",
+                    this.tools.size(), this.toolCallbacks.size());
         }
 
         public List<ProjectTool> tools() {
@@ -217,8 +227,12 @@ public class ToolService {
             return tools.toArray(Object[]::new);
         }
 
+        public ToolCallback[] asSpringAiToolCallbacks() {
+            return toolCallbacks.toArray(ToolCallback[]::new);
+        }
+
         public boolean isEmpty() {
-            return tools.isEmpty();
+            return toolCallbacks.isEmpty();
         }
 
         public String getCategorySummary() {
@@ -229,6 +243,23 @@ public class ToolService {
                     .sorted()
                     .map(c -> c + "(" + CATEGORY_LABELS.getOrDefault(c, c) + ")")
                     .collect(Collectors.joining(", "));
+        }
+
+        private static List<ToolCallback> createToolCallbacks(List<ProjectTool> tools) {
+            if (tools == null || tools.isEmpty()) {
+                return List.of();
+            }
+            return Arrays.stream(ToolCallbacks.from(tools.toArray(Object[]::new)))
+                    .filter(callback -> {
+                        String name = callback.getToolDefinition().name();
+                        if (name == null || name.isBlank()) {
+                            log.warn("Skipping Spring AI tool callback with blank name: {}",
+                                    callback.getToolDefinition());
+                            return false;
+                        }
+                        return true;
+                    })
+                    .toList();
         }
     }
 
@@ -243,9 +274,15 @@ public class ToolService {
         }
 
         public ChatClient create() {
-            ChatClient.Builder builder = ChatClient.builder(chatModel);
-            Object[] tools = toolRuntime.asSpringAiTools();
-            return tools.length == 0 ? builder.build() : builder.defaultTools(tools).build();
+            ChatClient.Builder builder = ChatClient.builder(chatModel)
+                    .defaultOptions(OpenAiChatOptions.builder()
+                            .toolChoice(ToolChoiceBuilder.AUTO)
+                            .parallelToolCalls(false)
+                            .build());
+            ToolCallback[] toolCallbacks = toolRuntime != null
+                    ? toolRuntime.asSpringAiToolCallbacks()
+                    : new ToolCallback[0];
+            return toolCallbacks.length == 0 ? builder.build() : builder.defaultToolCallbacks(toolCallbacks).build();
         }
     }
 

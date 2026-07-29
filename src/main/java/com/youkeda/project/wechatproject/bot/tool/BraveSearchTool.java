@@ -21,6 +21,7 @@ import org.springframework.web.client.RestTemplate;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 @Component
@@ -42,7 +43,7 @@ public class BraveSearchTool implements ProjectTool {
     private int resultCount = 5;
 
     @Tool(name = "web_search",
-          description = "【禁止用于地点/餐厅/POI/周边/导航/地图查询】搜索互联网获取新闻、百科知识、实时事件等通用信息。关键字中严禁包含地点名+推荐/餐厅/美食等组合——这类地点查询必须用高德工具。仅搜索新闻、百科、实时数据。可用 site:域名 限定网站、filetype:类型 过滤文件。")
+          description = "【禁止用于地点/餐厅/POI/周边/导航/地图查询】【新闻请用 search_news 工具】搜索互联网获取百科知识、实时事件、专业知识等通用信息。新闻类查询必须使用 search_news 工具，不要用本工具。关键字中严禁包含地点名+推荐/餐厅/美食等组合——这类地点查询必须用高德工具。可用 site:域名 限定网站、filetype:类型 过滤文件。")
     public String webSearch(String query) {
         if (apiKey == null || apiKey.isBlank()) {
             log.warn("UAPI Search API key not configured");
@@ -52,6 +53,13 @@ public class BraveSearchTool implements ProjectTool {
         String effectiveQuery = query != null ? query.trim() : "";
         if (effectiveQuery.isEmpty()) {
             return "搜索关键词为空，请提供具体的搜索内容。";
+        }
+
+        if (shouldUseBrowserAgent(effectiveQuery)) {
+            log.info("web_search rejected dynamic platform query, browser agent required: query={}", effectiveQuery);
+            return "This is a dynamic in-platform ranking/feed query and must be handled by Browser Agent, not web_search. "
+                    + "Use browser_navigate to open the platform page, then browser_get_content/browser_scroll/browser_click "
+                    + "to extract the live list. Query: " + effectiveQuery;
         }
 
         log.info("web_search invoked: query={}", effectiveQuery);
@@ -129,6 +137,28 @@ public class BraveSearchTool implements ProjectTool {
         factory.setConnectTimeout(Duration.ofMillis(connectTimeoutMs));
         factory.setReadTimeout(Duration.ofMillis(readTimeoutMs));
         return new RestTemplate(factory);
+    }
+
+    private static boolean shouldUseBrowserAgent(String query) {
+        String q = query.toLowerCase(Locale.ROOT);
+        boolean platform = containsAny(q, List.of(
+                "bilibili", "b站", "哔哩", "douyin", "抖音", "xiaohongshu", "小红书",
+                "weibo", "微博", "zhihu", "知乎", "youtube", "tiktok"
+        ));
+        boolean dynamicList = containsAny(q, List.of(
+                "今日热门", "热门视频", "热门榜", "热榜", "榜单", "排行榜", "全站排行",
+                "实时", "今天", "今日", "最新热门", "trending", "popular", "top"
+        ));
+        return platform && dynamicList;
+    }
+
+    private static boolean containsAny(String text, List<String> terms) {
+        for (String term : terms) {
+            if (text.contains(term.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---- getters / setters for @ConfigurationProperties binding ----

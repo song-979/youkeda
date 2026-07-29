@@ -21,8 +21,6 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.Charset;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.FileSystems;
 import java.nio.file.FileVisitResult;
@@ -173,7 +171,7 @@ public class LocalFileTools implements ProjectTool {
                         + "如需完整文件，请调用 send_local_file 发送。";
             }
 
-            String text = decodeText(bytes);
+            String text = TextDecodeUtil.decode(bytes);
             boolean truncated = size > bytes.length;
             StringBuilder sb = new StringBuilder();
             sb.append("文件：").append(file).append("\n");
@@ -614,35 +612,6 @@ public class LocalFileTools implements ProjectTool {
             }
         }
         return suspicious > sampleSize / 10;
-    }
-
-    private static String decodeText(byte[] bytes) {
-        try {
-            String text = new String(bytes, StandardCharsets.UTF_8);
-            if (!looksCorrupted(text)) {
-                return text;
-            }
-        } catch (Exception ignored) {
-        }
-
-        try {
-            return new String(bytes, Charset.forName("GBK"));
-        } catch (Exception e) {
-            return new String(bytes, StandardCharsets.UTF_8);
-        }
-    }
-
-    private static boolean looksCorrupted(String text) {
-        if (text.length() < 50) {
-            return false;
-        }
-        int replacementCount = 0;
-        for (int i = 0; i < Math.min(text.length(), 200); i++) {
-            if (text.charAt(i) == '\uFFFD') {
-                replacementCount++;
-            }
-        }
-        return replacementCount > 3;
     }
 
     private static String formatModifiedTime(Path file) throws IOException {

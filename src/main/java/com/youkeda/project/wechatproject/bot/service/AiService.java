@@ -46,6 +46,8 @@ import java.util.Objects;
  */
 public final class AiService {
 
+    private static final String DEFAULT_MEMORY_EMBEDDING_MODEL = "text-embedding-v4";
+
     private AiService() {
     }
 
@@ -75,6 +77,17 @@ public final class AiService {
 
         private int maxHistoryRounds = 10;
         private int memoryTtlMinutes = 30;
+        private String memoryBasePath = "data/memory";
+        private int dailyMemoryRetentionDays = 30;
+        private boolean memoryVectorEnabled = true;
+        private String memoryIndexPath;
+        private String memoryEmbeddingApiUrl;
+        private String memoryEmbeddingApiKey;
+        private String memoryEmbeddingModel = DEFAULT_MEMORY_EMBEDDING_MODEL;
+        private int memoryChunkChars = 900;
+        private int memoryChunkOverlapChars = 120;
+        private int memoryRetrievalTopK = 6;
+        private double memoryRetrievalMinScore = 0.18d;
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -135,6 +148,45 @@ public final class AiService {
 
         public int getMemoryTtlMinutes() { return memoryTtlMinutes; }
         public void setMemoryTtlMinutes(int memoryTtlMinutes) { this.memoryTtlMinutes = memoryTtlMinutes; }
+
+        public String getMemoryBasePath() { return memoryBasePath; }
+        public void setMemoryBasePath(String memoryBasePath) { this.memoryBasePath = memoryBasePath; }
+
+        public int getDailyMemoryRetentionDays() { return dailyMemoryRetentionDays; }
+        public void setDailyMemoryRetentionDays(int dailyMemoryRetentionDays) {
+            this.dailyMemoryRetentionDays = dailyMemoryRetentionDays;
+        }
+
+        public boolean isMemoryVectorEnabled() { return memoryVectorEnabled; }
+        public void setMemoryVectorEnabled(boolean memoryVectorEnabled) { this.memoryVectorEnabled = memoryVectorEnabled; }
+
+        public String getMemoryIndexPath() { return memoryIndexPath; }
+        public void setMemoryIndexPath(String memoryIndexPath) { this.memoryIndexPath = memoryIndexPath; }
+
+        public String getMemoryEmbeddingApiUrl() { return memoryEmbeddingApiUrl; }
+        public void setMemoryEmbeddingApiUrl(String memoryEmbeddingApiUrl) { this.memoryEmbeddingApiUrl = memoryEmbeddingApiUrl; }
+
+        public String getMemoryEmbeddingApiKey() { return memoryEmbeddingApiKey; }
+        public void setMemoryEmbeddingApiKey(String memoryEmbeddingApiKey) { this.memoryEmbeddingApiKey = memoryEmbeddingApiKey; }
+
+        public String getMemoryEmbeddingModel() { return memoryEmbeddingModel; }
+        public void setMemoryEmbeddingModel(String memoryEmbeddingModel) { this.memoryEmbeddingModel = memoryEmbeddingModel; }
+
+        public int getMemoryChunkChars() { return memoryChunkChars; }
+        public void setMemoryChunkChars(int memoryChunkChars) { this.memoryChunkChars = memoryChunkChars; }
+
+        public int getMemoryChunkOverlapChars() { return memoryChunkOverlapChars; }
+        public void setMemoryChunkOverlapChars(int memoryChunkOverlapChars) {
+            this.memoryChunkOverlapChars = memoryChunkOverlapChars;
+        }
+
+        public int getMemoryRetrievalTopK() { return memoryRetrievalTopK; }
+        public void setMemoryRetrievalTopK(int memoryRetrievalTopK) { this.memoryRetrievalTopK = memoryRetrievalTopK; }
+
+        public double getMemoryRetrievalMinScore() { return memoryRetrievalMinScore; }
+        public void setMemoryRetrievalMinScore(double memoryRetrievalMinScore) {
+            this.memoryRetrievalMinScore = memoryRetrievalMinScore;
+        }
     }
 
     public interface AiModelClient {
@@ -148,6 +200,10 @@ public final class AiService {
 
     public interface ImageGenClient {
         byte[] generate(String prompt) throws IOException;
+    }
+
+    public interface EmbeddingClient {
+        double[] embed(String text) throws IOException;
     }
 
     public static class OpenAiCompatibleClient implements AiModelClient {
@@ -619,6 +675,110 @@ public final class AiService {
             }
             String text = node.asText();
             return text == null || text.isBlank() ? null : text;
+        }
+    }
+
+    public static class OpenAiCompatibleEmbeddingClient implements EmbeddingClient {
+
+        private static final Logger log = LoggerFactory.getLogger(OpenAiCompatibleEmbeddingClient.class);
+
+        private final String apiUrl;
+        private final String apiKey;
+        private final String model;
+        private final RestTemplate restTemplate;
+
+        public OpenAiCompatibleEmbeddingClient(AgentProperties props) {
+            this.apiUrl = firstNonBlank(props.getMemoryEmbeddingApiUrl(), deriveEmbeddingUrl(props.getApiUrl()));
+            this.apiKey = firstNonBlank(props.getMemoryEmbeddingApiKey(), props.getApiKey());
+            this.model = firstNonBlank(props.getMemoryEmbeddingModel(), DEFAULT_MEMORY_EMBEDDING_MODEL);
+            this.restTemplate = createRestTemplate(props);
+        }
+
+        private static RestTemplate createRestTemplate(AgentProperties props) {
+            SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+            factory.setConnectTimeout(props.getConnectTimeoutMs());
+            factory.setReadTimeout(props.getReadTimeoutMs());
+            return new RestTemplate(factory);
+        }
+
+        @Override
+        public double[] embed(String text) throws IOException {
+            if (apiUrl == null || apiUrl.isBlank()) {
+                throw new IOException("embedding API URL is not configured");
+            }
+            if (apiKey == null || apiKey.isBlank()) {
+                throw new IOException("embedding API key is not configured");
+            }
+            if (text == null || text.isBlank()) {
+                return new double[0];
+            }
+
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("model", model);
+            request.put("input", text);
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(apiKey);
+
+            try {
+                ResponseEntity<EmbeddingResponse> response = restTemplate.postForEntity(
+                        apiUrl, new HttpEntity<>(request, headers), EmbeddingResponse.class);
+                EmbeddingResponse body = response.getBody();
+                double[] embedding = body != null ? body.firstEmbedding() : null;
+                if (embedding == null || embedding.length == 0) {
+                    throw new IOException("embedding API returned no vector");
+                }
+                return embedding;
+            } catch (RestClientException e) {
+                log.warn("embedding API call failed: url={}, model={}, error={}", apiUrl, model, e.getMessage());
+                throw new IOException("embedding API unavailable: " + e.getMessage(), e);
+            }
+        }
+
+        private static String deriveEmbeddingUrl(String chatUrl) {
+            if (chatUrl == null || chatUrl.isBlank()) {
+                return null;
+            }
+            if (chatUrl.endsWith("/chat/completions")) {
+                return chatUrl.substring(0, chatUrl.length() - "/chat/completions".length()) + "/embeddings";
+            }
+            if (chatUrl.endsWith("/chat/completions/")) {
+                return chatUrl.substring(0, chatUrl.length() - "/chat/completions/".length()) + "/embeddings";
+            }
+            return chatUrl;
+        }
+
+        private static String firstNonBlank(String first, String fallback) {
+            return first == null || first.isBlank() ? fallback : first;
+        }
+
+        public static class EmbeddingResponse {
+            @JsonProperty("data")
+            private List<EmbeddingData> data;
+
+            public List<EmbeddingData> getData() { return data; }
+            public void setData(List<EmbeddingData> data) { this.data = data; }
+
+            double[] firstEmbedding() {
+                if (data == null || data.isEmpty() || data.getFirst() == null || data.getFirst().embedding == null) {
+                    return null;
+                }
+                List<Double> values = data.getFirst().embedding;
+                double[] embedding = new double[values.size()];
+                for (int i = 0; i < values.size(); i++) {
+                    embedding[i] = values.get(i);
+                }
+                return embedding;
+            }
+        }
+
+        public static class EmbeddingData {
+            @JsonProperty("embedding")
+            private List<Double> embedding;
+
+            public List<Double> getEmbedding() { return embedding; }
+            public void setEmbedding(List<Double> embedding) { this.embedding = embedding; }
         }
     }
 
