@@ -30,6 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -58,6 +59,9 @@ class ToolServiceTests {
         assertThat(toolRuntime.tools()).hasAtLeastOneElementOfType(SystemTools.class);
         assertThat(toolRuntime.tools()).hasAtLeastOneElementOfType(WeatherTools.class);
         assertThat(toolRuntime.asSpringAiTools()).isNotEmpty();
+        assertThat(toolRuntime.asSpringAiToolCallbacks())
+                .isNotEmpty()
+                .allSatisfy(callback -> assertThat(callback.getToolDefinition().name()).isNotBlank());
         assertThat(context.getBeansOfType(ToolChatClientFactory.class)).hasSize(1);
     }
 
@@ -120,6 +124,30 @@ class ToolServiceTests {
         assertThat(result.output()).isEqualTo("tool-loop-response");
         verify(toolChatClient).prompt();
         verify(legacyClient, never()).chatStream(anyString(), anyList(), anyList());
+    }
+
+    @Test
+    void chatAgentHandlesBlankToolNameFailuresWithoutMisleadingLegacyFallback() throws IOException {
+        AiModelClient legacyClient = mock(AiModelClient.class);
+        ChatClient toolChatClient = mock(ChatClient.class);
+        ChatClient.ChatClientRequestSpec requestSpec = mock(ChatClient.ChatClientRequestSpec.class);
+
+        when(toolChatClient.prompt()).thenReturn(requestSpec);
+        when(requestSpec.messages(anyList())).thenReturn(requestSpec);
+        when(requestSpec.toolContext(anyMap())).thenReturn(requestSpec);
+        when(requestSpec.call()).thenThrow(new IllegalArgumentException("toolName cannot be null or empty"));
+        when(legacyClient.chatStream(anyString(), anyList(), anyList())).thenReturn("legacy-response");
+
+        ChatAgent chatAgent = new ChatAgent(legacyClient, null, testFactory(toolChatClient));
+
+        AgentResult result = chatAgent.execute(new AgentTask("CHAT", "open bilibili and search daoxiang", Map.of()));
+
+        assertThat(result.output()).isEqualTo("legacy-response");
+        verify(legacyClient).chatStream(
+                argThat(instruction -> instruction != null
+                        && instruction.contains("tool-call compatibility error")),
+                anyList(),
+                anyList());
     }
 
     @Test

@@ -11,6 +11,9 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
 import java.util.Map;
 
@@ -40,15 +43,20 @@ public class WeatherTools implements ToolService.ProjectTool {
     );
 
     private final RestTemplate restTemplate;
-    private final WeatherProperties properties;
+    private final String amapKey;
+    private final String privateKey;
 
-    public WeatherTools(WeatherProperties properties) {
-        this(properties, createRestTemplate());
+    public WeatherTools(String amapKey, String privateKey) {
+        this(amapKey, privateKey, createRestTemplate());
     }
 
-    WeatherTools(WeatherProperties properties, RestTemplate restTemplate) {
-        this.properties = properties;
+    WeatherTools(String amapKey, String privateKey, RestTemplate restTemplate) {
+        this.amapKey = trimToNull(amapKey);
+        this.privateKey = trimToNull(privateKey);
         this.restTemplate = restTemplate;
+        log.info("weather tool initialized: amapKey={}, privateKey={}",
+                credentialFingerprint(this.amapKey),
+                credentialFingerprint(this.privateKey));
     }
 
     @Tool(name = "get_current_weather",
@@ -59,7 +67,7 @@ public class WeatherTools implements ToolService.ProjectTool {
         if (location == null || location.isBlank()) {
             return "\u5929\u6c14\u67e5\u8be2\u5931\u8d25\uff1a\u8bf7\u63d0\u4f9b\u57ce\u5e02\u6216\u5730\u70b9\u540d\u79f0\u3002";
         }
-        if (properties.getAmapKey() == null || properties.getAmapKey().isBlank()) {
+        if (amapKey == null || amapKey.isBlank()) {
             return "\u5929\u6c14\u67e5\u8be2\u5931\u8d25\uff1a\u672a\u914d\u7f6e\u9ad8\u5fb7 Web \u670d\u52a1 API Key\uff0c\u8bf7\u914d\u7f6e agent.tools.weather.amap-key\u3002";
         }
 
@@ -81,7 +89,7 @@ public class WeatherTools implements ToolService.ProjectTool {
         if (location == null || location.isBlank()) {
             return "\u5929\u6c14\u9884\u62a5\u67e5\u8be2\u5931\u8d25\uff1a\u8bf7\u63d0\u4f9b\u57ce\u5e02\u6216\u5730\u70b9\u540d\u79f0\u3002";
         }
-        if (properties.getAmapKey() == null || properties.getAmapKey().isBlank()) {
+        if (amapKey == null || amapKey.isBlank()) {
             return "\u5929\u6c14\u9884\u62a5\u67e5\u8be2\u5931\u8d25\uff1a\u672a\u914d\u7f6e\u9ad8\u5fb7 Web \u670d\u52a1 API Key\uff0c\u8bf7\u914d\u7f6e agent.tools.weather.amap-key\u3002";
         }
 
@@ -156,14 +164,21 @@ public class WeatherTools implements ToolService.ProjectTool {
     }
 
     private JsonNode requestWeather(String city, String extensions) {
+        log.info("weather request — amapKey={}, hasPrivateKey={}",
+                amapKey != null ? amapKey.substring(0, 4) + "***" : "null",
+                privateKey != null && !privateKey.isBlank());
+
+        log.info("weather credential fingerprint: city={}, extensions={}, amapKey={}, privateKey={}",
+                city, extensions, credentialFingerprint(amapKey), credentialFingerprint(privateKey));
+
         UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(WEATHER_URL)
-                .queryParam("key", properties.getAmapKey())
+                .queryParam("key", amapKey)
                 .queryParam("city", city)
                 .queryParam("extensions", extensions)
                 .queryParam("output", "JSON");
 
         JsonNode root = parseJson(restTemplate.getForObject(
-                AmapSignUtil.appendSign(builder, properties.getAmapPrivateKey()).build().toUri(), String.class));
+                AmapSignUtil.appendSign(builder, privateKey).build().toUri(), String.class));
         ensureAmapSuccess(root);
         return root;
     }
@@ -173,62 +188,23 @@ public class WeatherTools implements ToolService.ProjectTool {
             return location;
         }
 
-        // Try the original keyword first, then progressively shorter variants.
-        // e.g. "杭州市余杭区" → try "余杭区" → try "杭州"
-        String current = location;
-        while (current != null && !current.isBlank()) {
-            String adcode = tryResolveAdcode(current);
-            if (adcode != null) {
-                return adcode;
-            }
-            current = shortenLocation(current);
-        }
-        throw new IllegalStateException("\u6ca1\u6709\u627e\u5230\u5730\u70b9\u201c" + location + "\u201d\u5bf9\u5e94\u7684 adcode");
-    }
-
-    private String tryResolveAdcode(String keywords) {
         UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(DISTRICT_URL)
-                .queryParam("key", properties.getAmapKey())
-                .queryParam("keywords", keywords)
+                .queryParam("key", amapKey)
+                .queryParam("keywords", location)
                 .queryParam("subdistrict", 0)
                 .queryParam("extensions", "base")
                 .queryParam("output", "JSON");
 
         JsonNode root = parseJson(restTemplate.getForObject(
-                AmapSignUtil.appendSign(builder, properties.getAmapPrivateKey()).build().toUri(), String.class));
+                AmapSignUtil.appendSign(builder, privateKey).build().toUri(), String.class));
         ensureAmapSuccess(root);
 
         JsonNode first = root.path("districts").path(0);
         String adcode = text(first.path("adcode"));
-        return (adcode != null && !adcode.isBlank()) ? adcode : null;
-    }
-
-    /**
-     * Shorten a location string by stripping the first 2+ char segment.
-     * "杭州市余杭区" → "余杭区", "余杭区" → "杭州", "杭州" → null
-     */
-    private static String shortenLocation(String location) {
-        if (location == null || location.length() < 3) {
-            return null;
+        if (adcode == null || adcode.isBlank()) {
+            throw new IllegalStateException("\u6ca1\u6709\u627e\u5230\u5730\u70b9\u201c" + location + "\u201d\u5bf9\u5e94\u7684 adcode");
         }
-        // Strip leading city prefix: "杭州市余杭区" → "余杭区", "浙江省杭州市" → "杭州市"
-        // Find the pattern: remove characters before the last district/city suffix
-        String shortened = location.replaceFirst("^[\\p{L}]{2,}(?:市|省|自治区|地区|州|盟)", "");
-        if (!shortened.equals(location) && !shortened.isBlank()) {
-            return shortened;
-        }
-        // If the above didn't work, try: "余杭区" → strip suffix → "余杭" (won't help much)
-        // Better: just return the city portion
-        if (location.endsWith("区") || location.endsWith("县") || location.endsWith("市")) {
-            String noSuffix = location.replaceFirst("(?:区|县|市)$", "");
-            if (noSuffix.contains("\u5e02")) {
-                // "杭州市" → "杭州"
-                return noSuffix.replace("\u5e02", "");
-            }
-            // Already tried with city prefix stripped, now try without district suffix for city query
-            return null;
-        }
-        return null;
+        return adcode;
     }
 
     private static JsonNode chooseByLocation(JsonNode items, String requestedLocation) {
@@ -247,30 +223,11 @@ public class WeatherTools implements ToolService.ProjectTool {
         String province = text(item.path("province"));
         String city = text(item.path("city"));
         String adcode = text(item.path("adcode"));
-        if (requestedLocation == null) {
-            return false;
-        }
-        if (requestedLocation.equals(adcode)) {
-            return true;
-        }
-        if (requestedLocation.equals(city)) {
-            return true;
-        }
-        // Handle "杭州市余杭区" → matches if city field contains the district name
-        if (city != null && !city.isBlank() && requestedLocation.endsWith(city)) {
-            return true;
-        }
-        // Handle adcode-based matching for known aliases
-        if ("330106".equals(requestedLocation) && "330106".equals(adcode)) {
-            return true;
-        }
-        if ("\u676d\u5dde".equals(requestedLocation) && ("330100".equals(adcode) || "\u676d\u5dde\u5e02".equals(city))) {
-            return true;
-        }
-        if ("\u676d\u5dde\u5e02".equals(requestedLocation) && ("330100".equals(adcode) || "\u676d\u5dde\u5e02".equals(city))) {
-            return true;
-        }
-        return false;
+        return requestedLocation != null && (requestedLocation.equals(adcode)
+                || ("330106".equals(requestedLocation) && "330106".equals(adcode))
+                || ("\u897f\u6e56\u533a".equals(requestedLocation) && "\u6d59\u6c5f".equals(province) && "\u897f\u6e56\u533a".equals(city))
+                || ("\u676d\u5dde".equals(requestedLocation) && ("330100".equals(adcode) || "\u676d\u5dde\u5e02".equals(city)))
+                || ("\u676d\u5dde\u5e02".equals(requestedLocation) && ("330100".equals(adcode) || "\u676d\u5dde\u5e02".equals(city))));
     }
 
     private static boolean isMissing(JsonNode node) {
@@ -294,6 +251,9 @@ public class WeatherTools implements ToolService.ProjectTool {
         String infocode = text(root.path("infocode"));
         if ("10009".equals(infocode) || "USERKEY_PLAT_NOMATCH".equals(info)) {
             throw new IllegalStateException("\u9ad8\u5fb7 Key \u5e73\u53f0\u7c7b\u578b\u4e0d\u5339\u914d\uff1a\u5f53\u524d key \u4e0d\u80fd\u8c03\u7528 Web \u670d\u52a1\u5929\u6c14\u63a5\u53e3\uff0c\u8bf7\u5728\u9ad8\u5fb7\u5f00\u653e\u5e73\u53f0\u521b\u5efa\u6216\u5207\u6362\u4e3a Web \u670d\u52a1\u7c7b\u578b Key\uff08infocode=10009\uff09");
+        }
+        if ("10007".equals(infocode) || "INVALID_USER_SIGNATURE".equals(info)) {
+            throw new IllegalStateException("高德数字签名校验失败：当前 amap-key 对应的 Web 服务私钥与 agent.tools.weather.amap-private-key 不匹配，或运行进程加载的配置不是最新配置（infocode=10007）");
         }
         throw new IllegalStateException("\u9ad8\u5fb7\u63a5\u53e3\u8fd4\u56de\u5931\u8d25"
                 + (info != null ? "\uff1a" + info : "")
@@ -359,6 +319,35 @@ public class WeatherTools implements ToolService.ProjectTool {
 
     private static String valueOrUnknown(String value) {
         return value != null && !value.isBlank() ? value : "\u672a\u77e5";
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return value.trim();
+    }
+
+    private static String credentialFingerprint(String value) {
+        if (value == null || value.isBlank()) {
+            return "missing";
+        }
+        String prefix = value.length() <= 4 ? value : value.substring(0, 4);
+        return prefix + "***(len=" + value.length() + ",sha256=" + sha256Prefix(value) + ")";
+    }
+
+    private static String sha256Prefix(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < Math.min(4, hash.length); i++) {
+                sb.append(String.format("%02x", hash[i] & 0xff));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            return "unavailable";
+        }
     }
 
     private static String text(JsonNode node) {

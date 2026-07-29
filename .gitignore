@@ -5,6 +5,10 @@ target/
 .env
 *.log
 src/main/resources/application.properties
+lib.db
+lib.db-*
+data/memory/**/*.sqlite
+data/memory/**/*.sqlite-*
 
 ### Local SDK copy ###
 wechat-ilink-sdk-java/

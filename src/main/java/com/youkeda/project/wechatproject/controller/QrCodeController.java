@@ -47,45 +47,38 @@ public class QrCodeController {
     @GetMapping(value = "/ilink/qrcode", produces = "text/html;charset=UTF-8")
     public String qrCode() {
         if (ilinkClient.isLoggedIn()) {
-            return page("<div class='success-icon'>&#10003;</div>"
-                    + "<h2>登录成功</h2>"
-                    + "<p>iLink 已成功连接</p>"
-                    + "<span class='bot-id'>botId: " + escape(ilinkClient.getLoginContext().getBotId()) + "</span>",
-                    "");
+            return loggedInPage(ilinkClient.getLoginContext().getBotId());
         }
 
         String qrCodeContent = messageBridge.getQrcode();
         if (qrCodeContent == null || qrCodeContent.isEmpty()) {
             return refreshPage(3,
-                    "<h2>正在获取二维码</h2><div class='spinner'></div><p>页面每3秒自动刷新</p>",
-                    "");
+                    "<h2>&#27491;&#22312;&#33719;&#21462;&#20108;&#32500;&#30721;...</h2>"
+                            + "<p>&#39029;&#38754;&#23558;&#33258;&#21160;&#21047;&#26032;&#65292;&#35831;&#31245;&#20505;&#12290;</p>",
+                    "padding-top:80px;");
         }
 
         try {
             String qrCodeSrc = renderToDataUri(qrCodeContent);
-            return refreshPage(
-                    30,
-                    "<div class='logo'>&#128172;</div>"
-                            + "<h2>微信扫码登录</h2>"
-                            + "<p>请使用微信扫描下方二维码</p>"
-                            + "<div class='qr-wrapper'>"
-                            + "<img src=\"" + escapeAttribute(qrCodeSrc) + "\" alt='QR Code'/>"
-                            + "</div>"
-                            + "<p class='refreshing'>页面每30秒自动刷新</p>",
-                    "");
+            return loginPage(qrCodeSrc);
         } catch (Exception e) {
             log.error("failed to render QR code from SDK content", e);
             return refreshPage(
                     30,
-                    "<div class='logo'>&#9888;</div>"
-                            + "<h2>二维码渲染失败</h2>"
-                            + "<p>SDK 返回的原始二维码内容，可继续排查：</p>"
-                            + "<div class='error-box'><textarea readonly>"
+            return refreshPage(30,
+                    "<h2>&#20108;&#32500;&#30721;&#28210;&#26579;&#22833;&#36133;</h2>"
+                            + "<p>&#19979;&#38754;&#26159; SDK &#36820;&#22238;&#30340;&#21407;&#22987;&#20108;&#32500;&#30721;&#20869;&#23481;&#65292;&#21487;&#32487;&#32493;&#25490;&#26597;&#12290;</p>"
+                            + "<textarea style='width:90%;max-width:960px;height:220px;'>"
                             + escape(qrCodeContent)
-                            + "</textarea></div>"
-                            + "<p class='refreshing'>页面每30秒自动刷新</p>",
-                    "");
+                            + "</textarea>"
+                            + "<p style='color:#999;margin-top:20px;'>&#39029;&#38754;&#23558;&#22312; 30 &#31186;&#21518;&#33258;&#21160;&#21047;&#26032;&#12290;</p>",
+                    "padding:40px 24px;");
         }
+    }
+
+    @GetMapping(value = "/ilink/qrcode/status", produces = "text/plain;charset=UTF-8")
+    public String loginStatus() {
+        return Boolean.toString(ilinkClient.isLoggedIn());
     }
 
     private static String renderToDataUri(String qrCodeContent) throws WriterException, IOException {
@@ -214,6 +207,64 @@ public class QrCodeController {
                 }
             </style>
             """;
+
+    private static String loginPage(String qrCodeSrc) {
+        String body = "<div style='max-width:520px;margin:0 auto;'>"
+                + "<h2 style='margin-bottom:14px;'>&#35831;&#20351;&#29992;&#24494;&#20449;&#25195;&#30721;&#30331;&#24405;</h2>"
+                + "<img src=\"" + escapeAttribute(qrCodeSrc) + "\""
+                + " style='max-width:320px;border:2px solid #ccc;padding:10px;background:#fff;'/>"
+                + "<p id='login-status' style='color:#666;margin-top:20px;'>&#25195;&#30721;&#21518;&#35831;&#20445;&#25345;&#24403;&#21069;&#39029;&#38754;&#25171;&#24320;&#65292;&#30331;&#24405;&#25104;&#21151;&#21518;&#20250;&#33258;&#21160;&#20851;&#38381;&#12290;</p>"
+                + "</div>";
+        return interactivePage(body, "padding:40px 24px;", loginPollingScript());
+    }
+
+    private static String loggedInPage(String botId) {
+        String body = "<h2>&#24050;&#30331;&#24405;&#25104;&#21151;</h2>"
+                + "<p>botId: " + escape(botId) + "</p>"
+                + "<p id='login-status' style='color:#666;margin-top:20px;'>&#27491;&#22312;&#20851;&#38381;&#24403;&#21069;&#31383;&#21475;...</p>";
+        return interactivePage(body, "padding-top:80px;", closeWindowScript());
+    }
+
+    private static String interactivePage(String body, String bodyStyle, String script) {
+        return "<html><head><meta charset='UTF-8'>"
+                + "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                + "</head><body style='font-family:sans-serif;text-align:center;" + bodyStyle + "'>"
+                + body
+                + "<script>" + script + "</script>"
+                + "</body></html>";
+    }
+
+    private static String loginPollingScript() {
+        return "(() => {"
+                + "const statusEl = document.getElementById('login-status');"
+                + "let closing = false;"
+                + "const closePage = () => {"
+                + "  if (closing) return;"
+                + "  closing = true;"
+                + "  if (statusEl) { statusEl.textContent = '\\u68c0\\u6d4b\\u5230\\u767b\\u5f55\\u6210\\u529f\\uff0c\\u6b63\\u5728\\u5173\\u95ed\\u7a97\\u53e3...'; }"
+                + "  window.close();"
+                + "};"
+                + "const checkStatus = async () => {"
+                + "  try {"
+                + "    const response = await fetch('/ilink/qrcode/status', { cache: 'no-store' });"
+                + "    const loggedIn = (await response.text()).trim() === 'true';"
+                + "    if (loggedIn) { closePage(); }"
+                + "  } catch (e) {"
+                + "    if (statusEl) { statusEl.textContent = '\\u7b49\\u5f85\\u767b\\u5f55\\u7ed3\\u679c\\uff0c\\u8bf7\\u4fdd\\u6301\\u9875\\u9762\\u6253\\u5f00\\u3002'; }"
+                + "  }"
+                + "};"
+                + "checkStatus();"
+                + "setInterval(checkStatus, 2000);"
+                + "})();";
+    }
+
+    private static String closeWindowScript() {
+        return "(() => {"
+                + "const statusEl = document.getElementById('login-status');"
+                + "if (statusEl) { statusEl.textContent = '\\u6b63\\u5728\\u5173\\u95ed\\u5f53\\u524d\\u7a97\\u53e3...'; }"
+                + "setTimeout(() => { window.close(); }, 100);"
+                + "})();";
+    }
 
     private static String page(String body, String bodyStyle) {
         return "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1,minimum-scale=1'>"

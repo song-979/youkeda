@@ -15,8 +15,10 @@ import com.youkeda.project.wechatproject.bot.tool.SkillTools;
 import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
 import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.DashScopeImageGenClient;
+import com.youkeda.project.wechatproject.bot.service.AiService.EmbeddingClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.ImageGenClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.OpenAiCompatibleClient;
+import com.youkeda.project.wechatproject.bot.service.AiService.OpenAiCompatibleEmbeddingClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.OpenAiImageGenClient;
 import com.youkeda.project.wechatproject.bot.service.BotService.ContextPersister;
 import com.youkeda.project.wechatproject.bot.service.BotService.IlinkClientLifecycle;
@@ -37,6 +39,8 @@ import com.youkeda.project.wechatproject.bot.service.OrchestrationService.Orches
 import com.youkeda.project.wechatproject.bot.service.OrchestrationService.SpeechAgent;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.AudioConverter;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.FunAsrSttClient;
+import com.youkeda.project.wechatproject.bot.service.OpenClawConversationMemory;
+import com.youkeda.project.wechatproject.bot.service.VectorMemoryIndex;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.Qwen3TtsFlashClient;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.SpeechProperties;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.SpeechToTextClient;
@@ -61,6 +65,7 @@ import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
 import java.net.http.HttpClient;
+import java.nio.file.Path;
 import java.util.List;
 
 @Configuration
@@ -292,9 +297,48 @@ public class BotAutoConfiguration {
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
     public ConversationMemory conversationMemory(AgentProperties props) {
-        log.info("creating InMemoryConversationMemory maxRounds={}, ttlMin={}",
-                props.getMaxHistoryRounds(), props.getMemoryTtlMinutes());
-        return new InMemoryConversationMemory(props.getMaxHistoryRounds(), props.getMemoryTtlMinutes());
+        log.info("creating OpenClawConversationMemory path={}, maxRounds={}, ttlMin={}, episodeRetentionDays={}",
+                props.getMemoryBasePath(), props.getMaxHistoryRounds(), props.getMemoryTtlMinutes(),
+                props.getDailyMemoryRetentionDays());
+        VectorMemoryIndex vectorIndex = createMemoryVectorIndex(props);
+        return new OpenClawConversationMemory(
+                props.getMaxHistoryRounds(),
+                props.getMemoryTtlMinutes(),
+                props.getMemoryBasePath(),
+                props.getDailyMemoryRetentionDays(),
+                vectorIndex);
+    }
+
+    private VectorMemoryIndex createMemoryVectorIndex(AgentProperties props) {
+        if (!props.isMemoryVectorEnabled()) {
+            log.info("OpenClaw memory vector retrieval disabled");
+            return null;
+        }
+
+        String embeddingKey = firstNonBlank(props.getMemoryEmbeddingApiKey(), props.getApiKey());
+        if (embeddingKey == null || embeddingKey.isBlank()) {
+            log.warn("OpenClaw memory vector retrieval disabled because no embedding API key is configured");
+            return null;
+        }
+
+        Path indexPath = props.getMemoryIndexPath() == null || props.getMemoryIndexPath().isBlank()
+                ? Path.of("lib.db").toAbsolutePath().normalize()
+                : Path.of(props.getMemoryIndexPath()).toAbsolutePath().normalize();
+        EmbeddingClient embeddingClient = new OpenAiCompatibleEmbeddingClient(props);
+        log.info("creating OpenClaw SQLite memory vector index path={}, model={}, topK={}",
+                indexPath, props.getMemoryEmbeddingModel(), props.getMemoryRetrievalTopK());
+        return new VectorMemoryIndex(
+                indexPath,
+                embeddingClient,
+                props.getMemoryChunkChars(),
+                props.getMemoryChunkOverlapChars(),
+                props.getMemoryRetrievalTopK(),
+                props.getMemoryRetrievalMinScore(),
+                props.getMemoryEmbeddingModel());
+    }
+
+    private static String firstNonBlank(String first, String fallback) {
+        return first == null || first.isBlank() ? fallback : first;
     }
 
     @Bean

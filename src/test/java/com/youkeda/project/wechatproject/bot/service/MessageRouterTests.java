@@ -107,6 +107,27 @@ class MessageRouterTests {
         assertThat(reply.getFilePayload()).isNull();
     }
 
+    @Test
+    void fastChatSkipsOrchestratorForSimpleTextWhenEnabled() throws IOException {
+        RecordingChatAgent chatAgent = new RecordingChatAgent("fast reply");
+        AgentRegistry registry = new AgentRegistry(List.of(chatAgent), null);
+        OrchestratorProperties properties = new OrchestratorProperties();
+        properties.setFastChatEnabled(true);
+        properties.setReflectionEnabled(false);
+        MessageRouter router = new MessageRouter(
+                new FailingOrchestrator(),
+                registry,
+                null,
+                null,
+                null,
+                properties);
+
+        ModelReply reply = router.route("user-1", "\u4f60\u597d", List.of());
+
+        assertThat(reply.getTextContent()).isEqualTo("fast reply");
+        assertThat(chatAgent.instructions).containsExactly("\u4f60\u597d");
+    }
+
     private static class UnsupportedReminderOrchestrator implements OrchestratorAgent {
         @Override
         public OrchestrationResult plan(UserRequest request) {
@@ -169,6 +190,18 @@ class MessageRouterTests {
         @Override
         public OrchestrationResult reflect(TaskScratchpad scratchpad, UserRequest originalRequest) {
             throw new UnsupportedOperationException("reflection disabled in this test");
+        }
+    }
+
+    private static class FailingOrchestrator implements OrchestratorAgent {
+        @Override
+        public OrchestrationResult plan(UserRequest request) {
+            throw new AssertionError("orchestrator should not be called");
+        }
+
+        @Override
+        public OrchestrationResult reflect(TaskScratchpad scratchpad, UserRequest originalRequest) {
+            throw new AssertionError("orchestrator should not be called");
         }
     }
 }

@@ -69,6 +69,11 @@ public class DiDiTaxiTools implements ToolService.ProjectTool {
         }
     }
 
+    /** Returns the current user ID from the request-scoped ThreadLocal. */
+    public static String getCurrentUser() {
+        return CURRENT_USER.get();
+    }
+
     /** Clear by {@code MessageRouter.route()} in its finally block. */
     public static void clearCurrentUser() {
         CURRENT_USER.remove();
@@ -110,7 +115,7 @@ public class DiDiTaxiTools implements ToolService.ProjectTool {
 
     /**
      * Look up and consume the latest valid session for a user.
-     * Returns null if no session exists or it has expired.
+     * Returns null if no session exists, or it has expired.
      */
     private EstimateSession consumeSession(String userId) {
         EstimateSession session = estimateSessions.get(userId);
