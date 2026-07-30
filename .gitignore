@@ -4,7 +4,11 @@ target/
 ### Secrets ###
 .env
 *.log
+*.bak
 src/main/resources/application.properties
+application-local.yaml
+config/application-local.yaml
+src/main/resources/application-local.yaml
 
 ### Local SDK copy ###
 wechat-ilink-sdk-java/

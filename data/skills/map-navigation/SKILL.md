@@ -1,5 +1,6 @@
 ---
 name: map-navigation
+agent: TRAVEL
 description: 地图搜索、周边查询、路线规划、导航。当用户提到附近、周边、地图、导航、路线、怎么去、在哪、位置、坐标时触发。
 allowed-categories: map_navigation, information
 priority: 10

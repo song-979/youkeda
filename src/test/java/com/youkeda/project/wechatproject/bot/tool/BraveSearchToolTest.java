@@ -1,5 +1,7 @@
 package com.youkeda.project.wechatproject.bot.tool;
 
+import com.youkeda.project.wechatproject.bot.tool.chat.BraveSearchTool;
+
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ProjectTool;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolRuntime;
 import org.junit.jupiter.api.Test;

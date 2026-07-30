@@ -1,5 +1,6 @@
 ---
 name: didi-taxi
+agent: TRAVEL
 description: 滴滴打车/叫车/出行。当用户提到打车、叫车、出行、滴滴、叫个车、怎么去（需要乘车前往）时触发。
 allowed-categories: didi_taxi, map_navigation, information
 priority: 10
