@@ -10,8 +10,8 @@ import com.github.wechat.ilink.sdk.core.context.ResumeContext;
 import com.github.wechat.ilink.sdk.core.listener.OnLoginListener;
 import com.github.wechat.ilink.sdk.core.login.LoginContext;
 import com.youkeda.project.wechatproject.bot.handler.MessageHandler;
-import com.youkeda.project.wechatproject.bot.tool.AutomationRuntime;
-import com.youkeda.project.wechatproject.bot.tool.SkillTools;
+import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
+import com.youkeda.project.wechatproject.bot.tool.chat.SkillTools;
 import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
 import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.DashScopeImageGenClient;
@@ -24,17 +24,26 @@ import com.youkeda.project.wechatproject.bot.service.BotService.IlinkProperties;
 import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
 
 import com.youkeda.project.wechatproject.bot.service.DocumentService;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentRegistry;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentUnit;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.ChatAgent;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.ConversationMemory;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.ImageGenAgent;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.InMemoryConversationMemory;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.MessageRouter;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.OrchestratorAgent;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.OrchestratorAgentImpl;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.OrchestratorProperties;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.SpeechAgent;
+import com.youkeda.project.wechatproject.bot.agent.AgentBus;
+import com.youkeda.project.wechatproject.bot.agent.AgentRegistry;
+import com.youkeda.project.wechatproject.bot.agent.AgentUnit;
+import com.youkeda.project.wechatproject.bot.agent.chat.ChatAgent;
+import com.youkeda.project.wechatproject.bot.agent.imagegen.ImageGenAgent;
+import com.youkeda.project.wechatproject.bot.agent.speech.SpeechAgent;
+import com.youkeda.project.wechatproject.bot.agent.browser.BrowserAgent;
+import com.youkeda.project.wechatproject.bot.agent.travel.TravelAgent;
+import com.youkeda.project.wechatproject.bot.memory.ConversationMemory;
+import com.youkeda.project.wechatproject.bot.memory.OpenClawConversationMemory;
+import com.youkeda.project.wechatproject.bot.memory.RagStore;
+import com.youkeda.project.wechatproject.bot.memory.SqliteRagStore;
+import com.youkeda.project.wechatproject.bot.memory.VectorMemoryIndex;
+import com.youkeda.project.wechatproject.bot.service.AiService.EmbeddingClient;
+import com.youkeda.project.wechatproject.bot.service.AiService.OpenAiCompatibleEmbeddingClient;
+import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorAgent;
+import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorAgentImpl;
+import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorProperties;
+import com.youkeda.project.wechatproject.bot.router.MessageRouter;
+import com.youkeda.project.wechatproject.bot.router.SimpleModeRouter;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.AudioConverter;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.FunAsrSttClient;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.Qwen3TtsFlashClient;
@@ -42,8 +51,8 @@ import com.youkeda.project.wechatproject.bot.service.VoiceService.SpeechProperti
 import com.youkeda.project.wechatproject.bot.service.VoiceService.SpeechToTextClient;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.TextToSpeechClient;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceCatalog;
-import com.youkeda.project.wechatproject.bot.tool.ScheduledTaskExecutionResult;
-import com.youkeda.project.wechatproject.bot.tool.ScheduledTaskExecutor;
+import com.youkeda.project.wechatproject.bot.tool.chat.ScheduledTaskExecutionResult;
+import com.youkeda.project.wechatproject.bot.tool.chat.ScheduledTaskExecutor;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolRuntime;
 import org.slf4j.Logger;
@@ -58,6 +67,10 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import org.springframework.http.client.JdkClientHttpRequestFactory;
+import org.springframework.retry.backoff.NoBackOffPolicy;
+import org.springframework.retry.support.RetryTemplate;
+import org.springframework.web.client.DefaultResponseErrorHandler;
+import org.springframework.web.client.ResponseErrorHandler;
 import org.springframework.web.client.RestClient;
 
 import java.net.http.HttpClient;
@@ -80,6 +93,20 @@ public class BotAutoConfiguration {
                 .version(HttpClient.Version.HTTP_1_1)
                 .build();
         return RestClient.builder().requestFactory(new JdkClientHttpRequestFactory(httpClient));
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ResponseErrorHandler responseErrorHandler() {
+        return new DefaultResponseErrorHandler();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public RetryTemplate retryTemplate() {
+        RetryTemplate template = new RetryTemplate();
+        template.setBackOffPolicy(new NoBackOffPolicy());
+        return template;
     }
 
     @Bean
@@ -291,10 +318,69 @@ public class BotAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public ConversationMemory conversationMemory(AgentProperties props) {
-        log.info("creating InMemoryConversationMemory maxRounds={}, ttlMin={}",
-                props.getMaxHistoryRounds(), props.getMemoryTtlMinutes());
-        return new InMemoryConversationMemory(props.getMaxHistoryRounds(), props.getMemoryTtlMinutes());
+    public EmbeddingClient embeddingClient(AgentProperties props) {
+        log.info("creating OpenAiCompatibleEmbeddingClient for embedding model={}", props.getMemoryEmbeddingModel());
+        return new OpenAiCompatibleEmbeddingClient(props);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public VectorMemoryIndex memoryVectorIndex(EmbeddingClient embeddingClient, AgentProperties props) {
+        String indexPath = props.getMemoryIndexPath();
+        if (indexPath == null || indexPath.isBlank()) {
+            indexPath = props.getMemoryBasePath() + "/memory-index.db";
+        }
+        log.info("creating VectorMemoryIndex at {}", indexPath);
+        return new VectorMemoryIndex(
+                java.nio.file.Path.of(indexPath),
+                embeddingClient,
+                props.getMemoryChunkChars(),
+                props.getMemoryChunkOverlapChars(),
+                props.getMemoryRetrievalTopK(),
+                props.getMemoryRetrievalMinScore(),
+                props.getMemoryEmbeddingModel());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.rag", name = "enabled", havingValue = "true")
+    public RagStore ragStore(EmbeddingClient embeddingClient, AgentProperties props) {
+        String indexPath = props.getMemoryIndexPath();
+        if (indexPath == null || indexPath.isBlank()) {
+            indexPath = props.getMemoryBasePath() + "/memory-index.db";
+        }
+        log.info("creating SqliteRagStore at {}, chunkChars={}, topK={}",
+                indexPath, props.getRagChunkChars(), props.getRagTopK());
+        return new SqliteRagStore(
+                java.nio.file.Path.of(indexPath),
+                embeddingClient,
+                props.getRagChunkChars(),
+                props.getRagChunkOverlapChars(),
+                props.getRagTopK(),
+                props.getRagMinScore(),
+                props.getMemoryEmbeddingModel());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public ConversationMemory conversationMemory(AgentProperties props,
+                                                   ObjectProvider<VectorMemoryIndex> vectorIndexProvider,
+                                                   ObjectProvider<AiModelClient> aiClientProvider) {
+        VectorMemoryIndex vectorIndex = props.isMemoryVectorEnabled()
+                ? vectorIndexProvider.getIfAvailable() : null;
+        AiModelClient aiClient = aiClientProvider.getIfAvailable();
+        log.info("creating OpenClawConversationMemory basePath={}, maxRounds={}, ttlMin={}, vectorEnabled={}, llmSummary={}",
+                props.getMemoryBasePath(), props.getMaxHistoryRounds(),
+                props.getMemoryTtlMinutes(), vectorIndex != null, aiClient != null);
+        return new OpenClawConversationMemory(
+                props.getMaxHistoryRounds(),
+                props.getMemoryTtlMinutes(),
+                props.getMemoryBasePath(),
+                props.getDailyMemoryRetentionDays(),
+                vectorIndex,
+                aiClient);
     }
 
     @Bean
@@ -317,8 +403,44 @@ public class BotAutoConfiguration {
         ToolRuntime toolRuntime = toolRuntimeProvider.getIfAvailable();
         String categories = toolRuntime != null ? toolRuntime.getCategorySummary() : "";
         SkillTools skillTools = skillToolsProvider.getIfAvailable();
-        String skillsSummary = skillTools != null ? skillTools.getSkillsSummary() : "";
+        String skillsSummary = skillTools != null ? skillTools.getSkillsSummary("CHAT") : "";
         return new ChatAgent(aiModelClient, props, toolChatClientFactoryProvider.getIfAvailable(), categories, skillsSummary);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public TravelAgent travelAgent(
+            @org.springframework.beans.factory.annotation.Qualifier("travelToolChatClientFactory")
+            ObjectProvider<ToolChatClientFactory> travelToolChatClientFactoryProvider,
+            ObjectProvider<SkillTools> skillToolsProvider) {
+        ToolChatClientFactory factory = travelToolChatClientFactoryProvider.getIfAvailable();
+        if (factory == null) {
+            log.info("TravelAgent not created: no travel tools available");
+        } else {
+            log.info("creating TravelAgent");
+        }
+        SkillTools skillTools = skillToolsProvider.getIfAvailable();
+        String skillsSummary = skillTools != null ? skillTools.getSkillsSummary("TRAVEL") : "";
+        return new TravelAgent(factory, skillsSummary);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public BrowserAgent browserAgent(
+            @org.springframework.beans.factory.annotation.Qualifier("browserToolChatClientFactory")
+            ObjectProvider<ToolChatClientFactory> browserToolChatClientFactoryProvider,
+            ObjectProvider<SkillTools> skillToolsProvider) {
+        ToolChatClientFactory factory = browserToolChatClientFactoryProvider.getIfAvailable();
+        if (factory == null) {
+            log.info("BrowserAgent not created: no browser tools available");
+        } else {
+            log.info("creating BrowserAgent");
+        }
+        SkillTools skillTools = skillToolsProvider.getIfAvailable();
+        String skillsSummary = skillTools != null ? skillTools.getSkillsSummary("BROWSER") : "";
+        return new BrowserAgent(factory, skillsSummary);
     }
 
     @Bean
@@ -373,6 +495,14 @@ public class BotAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public AgentBus agentBus(AgentRegistry agentRegistry) {
+        log.info("creating AgentBus");
+        return new AgentBus(agentRegistry);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
     public DocumentService documentService(ObjectProvider<SpeechToTextClient> sttClientProvider) {
         log.info("creating DocumentService");
         return new DocumentService(sttClientProvider.getIfAvailable());
@@ -391,15 +521,25 @@ public class BotAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public SimpleModeRouter simpleModeRouter(AgentRegistry agentRegistry,
+                                             ConversationMemory conversationMemory) {
+        log.info("creating SimpleModeRouter");
+        return new SimpleModeRouter(agentRegistry, conversationMemory);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
     public MessageRouter messageRouter(OrchestratorAgent orchestratorAgent,
                                        AgentRegistry agentRegistry,
                                        ConversationMemory conversationMemory,
                                        VoiceCatalog voiceCatalog,
                                        DocumentService documentService,
-                                       OrchestratorProperties orchestratorProperties) {
+                                       OrchestratorProperties orchestratorProperties,
+                                       SimpleModeRouter simpleModeRouter) {
         log.info("creating MessageRouter (orchestration mode)");
         return new MessageRouter(orchestratorAgent, agentRegistry, conversationMemory, voiceCatalog,
-                documentService, orchestratorProperties);
+                documentService, orchestratorProperties, simpleModeRouter);
     }
 
     @Bean
@@ -516,10 +656,12 @@ public class BotAutoConfiguration {
                                          ObjectProvider<SpeechToTextClient> sttClientProvider,
                                          ObjectProvider<AudioConverter> audioConverterProvider,
                                          DocumentService documentService,
-                                         ObjectProvider<AutomationRuntime> automationRuntimeProvider) {
+                                         ObjectProvider<AutomationRuntime> automationRuntimeProvider,
+                                         ObjectProvider<RagStore> ragStoreProvider) {
         log.info("creating MessageHandler");
         return new MessageHandler(ilinkClient, messageBridge, messageRouter,
                 sttClientProvider.getIfAvailable(), audioConverterProvider.getIfAvailable(), documentService,
-                automationRuntimeProvider.getIfAvailable());
+                automationRuntimeProvider.getIfAvailable(),
+                ragStoreProvider.getIfAvailable());
     }
 }

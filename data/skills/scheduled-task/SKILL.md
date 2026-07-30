@@ -1,5 +1,6 @@
 ---
 name: scheduled-task
+agent: CHAT
 description: 定时任务、提醒、延时操作。当用户提到定时、提醒、指定时间、明天、明早、明晚、后天、几点、等会、过会、稍后、小时后、分钟后、日程、到时、叫醒、通知我、帮我查、帮我搜索、帮我生成时触发。
 allowed-categories: automation, information
 priority: 10

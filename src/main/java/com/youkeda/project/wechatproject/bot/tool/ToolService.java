@@ -1,6 +1,29 @@
 package com.youkeda.project.wechatproject.bot.tool;
 
 import com.github.wechat.ilink.sdk.ILinkClient;
+import com.youkeda.project.wechatproject.bot.tool.browser.BrowserAuditLogger;
+import com.youkeda.project.wechatproject.bot.tool.browser.BrowserMcpClient;
+import com.youkeda.project.wechatproject.bot.tool.browser.BrowserMcpProcess;
+import com.youkeda.project.wechatproject.bot.tool.browser.BrowserMcpProperties;
+import com.youkeda.project.wechatproject.bot.tool.browser.BrowserSecurityPolicy;
+import com.youkeda.project.wechatproject.bot.tool.browser.BrowserTools;
+import com.youkeda.project.wechatproject.bot.tool.chat.AutomationProperties;
+import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
+import com.youkeda.project.wechatproject.bot.tool.chat.AutomationStore;
+import com.youkeda.project.wechatproject.bot.tool.chat.AutomationTools;
+import com.youkeda.project.wechatproject.bot.tool.chat.JsonAutomationStore;
+import com.youkeda.project.wechatproject.bot.tool.chat.RecipientBindingListener;
+import com.youkeda.project.wechatproject.bot.tool.chat.ScheduledTaskExecutionResult;
+import com.youkeda.project.wechatproject.bot.tool.chat.ScheduledTaskExecutor;
+import com.youkeda.project.wechatproject.bot.tool.chat.UserMessageTool;
+import com.youkeda.project.wechatproject.bot.tool.chat.WorldTimeTools;
+import com.youkeda.project.wechatproject.bot.tool.travel.AmapAroundSearchTools;
+import com.youkeda.project.wechatproject.bot.tool.travel.AmapDirectionTools;
+import com.youkeda.project.wechatproject.bot.tool.travel.AmapPlaceIdTools;
+import com.youkeda.project.wechatproject.bot.tool.travel.AmapStaticMapTools;
+import com.youkeda.project.wechatproject.bot.tool.travel.DiDiMcpClient;
+import com.youkeda.project.wechatproject.bot.tool.travel.DiDiTaxiTools;
+import com.youkeda.project.wechatproject.bot.tool.travel.WeatherTools;
 import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,15 +38,19 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -37,23 +64,85 @@ import java.util.stream.Collectors;
         ToolService.ToolProperties.class,
         AutomationProperties.class,
         WeatherTools.WeatherProperties.class,
-        WorldTimeTools.WorldTimeProperties.class
+        WorldTimeTools.WorldTimeProperties.class,
+        BrowserMcpProperties.class
 })
 @ConditionalOnProperty(prefix = "agent.tools", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class ToolService {
 
+    /** Tool categories that belong to TravelAgent. */
+    private static final Set<String> TRAVEL_CATEGORIES = Set.of("map_navigation", "didi_taxi");
+
+    /** Tool categories that belong to BrowserAgent. */
+    private static final Set<String> BROWSER_CATEGORIES = Set.of("browser");
+
+    @Primary
     @Bean
     @ConditionalOnMissingBean
     public ToolRuntime toolRuntime(List<ProjectTool> projectTools,
                                    ObjectProvider<RecipientBindingListener> recipientBindingListenerProvider) {
         recipientBindingListenerProvider.getIfAvailable();
-        return new ToolRuntime(projectTools);
+        List<ProjectTool> nonAgentTools = projectTools.stream()
+                .filter(t -> !TRAVEL_CATEGORIES.contains(t.category()))
+                .filter(t -> !BROWSER_CATEGORIES.contains(t.category()))
+                .filter(t -> !(t instanceof WeatherTools))
+                .toList();
+        return new ToolRuntime(nonAgentTools);
     }
 
+    @Primary
     @Bean
     @ConditionalOnMissingBean
     public ToolChatClientFactory toolChatClientFactory(ChatModel chatModel, ToolRuntime toolRuntime) {
         return new ToolChatClientFactory(chatModel, toolRuntime);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "travelToolRuntime")
+    public ToolRuntime travelToolRuntime(List<ProjectTool> projectTools) {
+        List<ProjectTool> travelTools = new ArrayList<>();
+        for (ProjectTool tool : projectTools) {
+            if (TRAVEL_CATEGORIES.contains(tool.category())
+                    || tool instanceof WeatherTools
+                    || "skill".equals(tool.category())
+                    || "information".equals(tool.category())) {
+                travelTools.add(tool);
+            }
+        }
+        return new ToolRuntime(travelTools);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "travelToolChatClientFactory")
+    public ToolChatClientFactory travelToolChatClientFactory(ChatModel chatModel,
+            @org.springframework.beans.factory.annotation.Qualifier("travelToolRuntime") ToolRuntime travelToolRuntime) {
+        return new ToolChatClientFactory(chatModel, travelToolRuntime);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "browserToolRuntime")
+    public ToolRuntime browserToolRuntime(List<ProjectTool> projectTools) {
+        List<ProjectTool> browserTools = new ArrayList<>();
+        for (ProjectTool tool : projectTools) {
+            if (BROWSER_CATEGORIES.contains(tool.category()) || "skill".equals(tool.category())
+                    || "information".equals(tool.category())) {
+                browserTools.add(tool);
+            }
+        }
+        return new ToolRuntime(browserTools);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "browserToolChatClientFactory")
+    public ToolChatClientFactory browserToolChatClientFactory(ChatModel chatModel,
+            @org.springframework.beans.factory.annotation.Qualifier("browserToolRuntime") ToolRuntime browserToolRuntime) {
+        return new ToolChatClientFactory(chatModel, browserToolRuntime);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public UserMessageTool userMessageTool() {
+        return new UserMessageTool();
     }
 
     @Bean
@@ -182,6 +271,56 @@ public class ToolService {
         return new DiDiTaxiTools(diDiMcpClient);
     }
 
+    // -------------------------------------------------------------------------
+    // 浏览器自动化工具（chrome-devtools-mcp）
+    // -------------------------------------------------------------------------
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.browser", name = "enabled", havingValue = "true")
+    public BrowserMcpProcess browserMcpProcess(BrowserMcpProperties browserMcpProperties) throws IOException {
+        BrowserMcpProcess process = new BrowserMcpProcess(browserMcpProperties);
+        process.start();
+        return process;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.browser", name = "enabled", havingValue = "true")
+    public BrowserMcpClient browserMcpClient(BrowserMcpProcess browserMcpProcess,
+                                              BrowserMcpProperties browserMcpProperties) throws IOException {
+        BrowserMcpClient client = new BrowserMcpClient(browserMcpProcess, browserMcpProperties);
+        client.initialize();
+        return client;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.browser", name = "enabled", havingValue = "true")
+    public BrowserSecurityPolicy browserSecurityPolicy(BrowserMcpProperties browserMcpProperties) {
+        return new BrowserSecurityPolicy(browserMcpProperties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.browser", name = "enabled", havingValue = "true")
+    public BrowserAuditLogger browserAuditLogger(BrowserMcpProperties browserMcpProperties) {
+        return new BrowserAuditLogger(browserMcpProperties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.browser", name = "enabled", havingValue = "true")
+    public BrowserTools browserTools(BrowserMcpClient browserMcpClient, BrowserMcpProcess browserMcpProcess,
+                                       BrowserSecurityPolicy browserSecurityPolicy,
+                                       BrowserMcpProperties browserMcpProperties,
+                                       BrowserAuditLogger browserAuditLogger) {
+        return new BrowserTools(browserMcpClient, browserMcpProcess,
+                browserSecurityPolicy, browserMcpProperties, browserAuditLogger);
+    }
+
+    // -------------------------------------------------------------------------
+
     public interface ProjectTool {
         /** 工具能力类别，用于编排模型路由决策。例如 "information", "web_content", "media_generation" */
         default String category() { return ""; }
@@ -192,14 +331,15 @@ public class ToolService {
         private static final Logger log = LoggerFactory.getLogger(ToolRuntime.class);
 
         private static final Map<String, String> CATEGORY_LABELS = Map.of(
-                "information", "信息查询（时间、天气、搜索）",
+                "information", "信息查询（时间、搜索）",
                 "web_content", "网页内容获取",
                 "media_generation", "媒体生成（GIF表情）",
                 "automation", "定时提醒与日程（创建提醒、定时任务、日常安排、闹钟）",
                 "local_files", "本地文件检索、读取和发送",
                 "map_navigation", "高德地图（地点搜索、周边搜索、路线规划、静态地图）",
                 "didi_taxi", "滴滴打车（价格预估、叫车、订单查询、取消订单、司机位置、行程链接）",
-                "skill", "技能检索（先检索Skill获取执行指南，再调用领域工具）"
+                "skill", "技能检索（先检索Skill获取执行指南，再调用领域工具）",
+                "browser", "浏览器自动化（网页导航、表单填写、截图、网络抓包）"
         );
 
         private final List<ProjectTool> tools;

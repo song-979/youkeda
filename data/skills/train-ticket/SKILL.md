@@ -1,5 +1,6 @@
 ---
 name: train-ticket
+agent: TRAVEL
 description: 查询火车票、高铁票、动车票余票信息。当用户提到车票、火车、高铁、动车、12306、车次时触发。
 allowed-categories: information
 priority: 10

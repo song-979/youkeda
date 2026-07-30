@@ -7,14 +7,15 @@ import com.github.wechat.ilink.sdk.core.model.MessageItem;
 import com.github.wechat.ilink.sdk.core.model.TextItem;
 import com.github.wechat.ilink.sdk.core.model.VoiceItem;
 import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
+import com.youkeda.project.wechatproject.bot.memory.RagStore;
 import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
 import com.youkeda.project.wechatproject.bot.service.DocumentService;
 import com.youkeda.project.wechatproject.bot.service.DocumentService.ParseResult;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.MessageRouter;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.ModelReply;
+import com.youkeda.project.wechatproject.bot.router.MessageRouter;
+import com.youkeda.project.wechatproject.bot.model.ModelReply;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.AudioConverter;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.SpeechToTextClient;
-import com.youkeda.project.wechatproject.bot.tool.AutomationRuntime;
+import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,6 +59,7 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     private final AudioConverter audioConverter;
     private final DocumentService documentService;
     private final AutomationRuntime automationRuntime;
+    private final RagStore ragStore;
 
     public MessageHandler(ILinkClient ilinkClient,
                           MessageBridge messageBridge,
@@ -65,7 +67,8 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
                           SpeechToTextClient sttClient,
                           AudioConverter audioConverter,
                           DocumentService documentService,
-                          AutomationRuntime automationRuntime) {
+                          AutomationRuntime automationRuntime,
+                          RagStore ragStore) {
         this.ilinkClient = ilinkClient;
         this.messageBridge = messageBridge;
         this.router = router;
@@ -73,6 +76,7 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         this.audioConverter = audioConverter;
         this.documentService = documentService;
         this.automationRuntime = automationRuntime;
+        this.ragStore = ragStore;
     }
 
     @Override
@@ -105,6 +109,7 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
 
         ParseResult fileResult = parseFiles(items);
         if (fileResult != null) {
+            indexFileContent(fromUserId, fileResult);
             text = annotateFileContent(fileResult, text);
             List<String> fileImageUrls = compressFileImages(fileResult.images());
             List<String> combinedImages = new ArrayList<>(fileImageUrls);
@@ -469,6 +474,34 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         return null;
     }
 
+    /**
+     * Auto-index parsed file content into RagStore for future semantic search.
+     * Skips audio files (speech transcripts) and empty/error content.
+     */
+    private void indexFileContent(String userId, ParseResult fileResult) {
+        if (ragStore == null) {
+            return;
+        }
+        if (fileResult == null || fileResult.text() == null || fileResult.text().isBlank()) {
+            return;
+        }
+        // Skip error messages and audio transcripts
+        if (fileResult.text().startsWith("⚠️ 文件解析失败")) {
+            return;
+        }
+        String ext = DocumentService.extractExtension(fileResult.fileName());
+        if (ext != null && (ext.equals("mp3") || ext.equals("wav") || ext.equals("m4a")
+                || ext.equals("ogg") || ext.equals("flac") || ext.equals("wma") || ext.equals("aac") || ext.equals("opus"))) {
+            return;
+        }
+        try {
+            ragStore.index(userId, "default", fileResult.fileName(), fileResult.text());
+            log.debug("auto-indexed file '{}' to rag for userId={}", fileResult.fileName(), userId);
+        } catch (Exception e) {
+            log.warn("failed to auto-index file '{}' to rag: {}", fileResult.fileName(), e.getMessage());
+        }
+    }
+
     private static long parseFileLen(String lenStr) {
         if (lenStr == null || lenStr.isBlank()) {
             return 0;
@@ -505,6 +538,10 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
 
         if (!fileResult.images().isEmpty()) {
             annotated.append("\n（文档包含 ").append(fileResult.images().size()).append(" 张嵌入图片，已提取并附带在消息中）");
+        }
+
+        if (!isAudio) {
+            annotated.append("\n（文件已自动索引到知识库 \"default\"，后续可用 search_rag 工具搜索文档内容）");
         }
 
         if (userText != null && !userText.isBlank()) {

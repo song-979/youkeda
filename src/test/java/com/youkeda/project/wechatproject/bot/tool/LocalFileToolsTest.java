@@ -1,5 +1,7 @@
 package com.youkeda.project.wechatproject.bot.tool;
 
+import com.youkeda.project.wechatproject.bot.tool.chat.LocalFileTools;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

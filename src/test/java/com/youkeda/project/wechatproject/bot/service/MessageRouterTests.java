@@ -1,18 +1,18 @@
 package com.youkeda.project.wechatproject.bot.service;
 
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentCapability;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentRegistry;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentResult;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentTask;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.AgentUnit;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.MessageRouter;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.ModelReply;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.OrchestrationResult;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.OrchestratorAgent;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.OrchestratorProperties;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.TaskScratchpad;
-import com.youkeda.project.wechatproject.bot.service.OrchestrationService.UserRequest;
-import com.youkeda.project.wechatproject.bot.tool.LocalFileTools;
+import com.youkeda.project.wechatproject.bot.agent.AgentCapability;
+import com.youkeda.project.wechatproject.bot.agent.AgentRegistry;
+import com.youkeda.project.wechatproject.bot.agent.AgentResult;
+import com.youkeda.project.wechatproject.bot.agent.AgentTask;
+import com.youkeda.project.wechatproject.bot.agent.AgentUnit;
+import com.youkeda.project.wechatproject.bot.router.MessageRouter;
+import com.youkeda.project.wechatproject.bot.model.ModelReply;
+import com.youkeda.project.wechatproject.bot.orchestrator.OrchestrationResult;
+import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorAgent;
+import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorProperties;
+import com.youkeda.project.wechatproject.bot.orchestrator.TaskScratchpad;
+import com.youkeda.project.wechatproject.bot.model.UserRequest;
+import com.youkeda.project.wechatproject.bot.tool.chat.LocalFileTools;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
