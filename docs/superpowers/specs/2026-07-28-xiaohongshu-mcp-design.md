@@ -43,6 +43,19 @@ Initial user-facing tools:
 
 Publishing tools will pass through only the data needed by the MCP tool. The Java layer will not store Xiaohongshu cookies or account credentials; those remain owned by the MCP server.
 
+## Local MCP Process Management
+
+The Java project can optionally manage the local Xiaohongshu MCP server process so the user only starts the Spring Boot app in normal use.
+
+- `agent.tools.xiaohongshu.process.auto-start=false` by default.
+- When `auto-start=true`, the lifecycle manager first probes the configured MCP endpoint.
+- If the endpoint is already reachable, the manager reuses it and does not own or stop that external process.
+- If the endpoint is unavailable and a command is configured, the manager starts the command with `ProcessBuilder`, waits until the endpoint becomes reachable, and stores the owned process handle.
+- On Spring shutdown, the manager stops only the process it started.
+- If no command is configured, the manager logs a clear warning. `fail-on-startup-error=true` can be used when startup should fail fast.
+
+This keeps Xiaohongshu login state, cookies, and browser automation inside the MCP project while making local startup smoother from the bot project.
+
 ## Safety Rules
 
 Publishing creates public or account-visible content, so the tools must avoid accidental posting.
@@ -57,16 +70,25 @@ Publishing creates public or account-visible content, so the tools must avoid ac
 
 Add properties under `agent.tools.xiaohongshu`:
 
-- `enabled`: defaults to `false` to avoid accidental real-world posting before endpoint/session setup.
-- `endpoint`: MCP streamable HTTP endpoint.
+- `enabled`: defaults to `true` so the CHAT agent can see the Xiaohongshu tools.
+- `endpoint`: MCP streamable HTTP endpoint, default `http://127.0.0.1:18060/mcp`.
 - `connect-timeout-ms`: default 5000.
 - `read-timeout-ms`: default 120000 because upload/publish can be slow.
-- `dry-run`: default `false`.
+- `dry-run`: default `true` to avoid accidental real-world posting before endpoint/session setup.
 - `max-image-count`: default 18.
 - `publish-image-tool-name`: default `publish_content`.
 - `publish-video-tool-name`: default `publish_with_video`, configurable for MCP servers that expose `publish_video`.
 - `detail-tool-name`: default `get_note_detail`.
 - `search-tool-name`: default `search_notes`.
+- `login-status-tool-name`: default `check_login_status`.
+- `process.auto-start`: default `true`.
+- `process.command`: default `auto`, or a comma-separated command list for a custom local MCP server.
+- `process.working-directory`: directory where the MCP command should run.
+- `process.environment`: optional environment variables for the MCP process.
+- `process.startup-timeout-ms`: default `30000`.
+- `process.stop-timeout-ms`: default `5000`.
+- `process.probe-timeout-ms`: default `1000`.
+- `process.fail-on-startup-error`: default `false`.
 
 `ToolService` will add category label `xiaohongshu` and register the MCP client/tools when enabled.
 

@@ -24,6 +24,10 @@ import com.youkeda.project.wechatproject.bot.tool.travel.AmapStaticMapTools;
 import com.youkeda.project.wechatproject.bot.tool.travel.DiDiMcpClient;
 import com.youkeda.project.wechatproject.bot.tool.travel.DiDiTaxiTools;
 import com.youkeda.project.wechatproject.bot.tool.travel.WeatherTools;
+import com.youkeda.project.wechatproject.bot.tool.xiaohongshutool.XiaohongshuMcpClient;
+import com.youkeda.project.wechatproject.bot.tool.xiaohongshutool.XiaohongshuMcpProcessManager;
+import com.youkeda.project.wechatproject.bot.tool.xiaohongshutool.XiaohongshuProperties;
+import com.youkeda.project.wechatproject.bot.tool.xiaohongshutool.XiaohongshuTools;
 import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,7 +69,8 @@ import java.util.stream.Collectors;
         AutomationProperties.class,
         WeatherTools.WeatherProperties.class,
         WorldTimeTools.WorldTimeProperties.class,
-        BrowserMcpProperties.class
+        BrowserMcpProperties.class,
+        XiaohongshuProperties.class
 })
 @ConditionalOnProperty(prefix = "agent.tools", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class ToolService {
@@ -317,6 +322,31 @@ public class ToolService {
                                        BrowserAuditLogger browserAuditLogger) {
         return new BrowserTools(browserMcpClient, browserMcpProcess,
                 browserSecurityPolicy, browserMcpProperties, browserAuditLogger);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.xiaohongshu", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public XiaohongshuMcpProcessManager xiaohongshuMcpProcessManager(XiaohongshuProperties properties) {
+        return new XiaohongshuMcpProcessManager(properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.xiaohongshu", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public XiaohongshuMcpClient xiaohongshuMcpClient(XiaohongshuProperties properties) {
+        return new XiaohongshuMcpClient(properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.xiaohongshu", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public XiaohongshuTools xiaohongshuTools(XiaohongshuMcpClient xiaohongshuMcpClient,
+                                             XiaohongshuProperties properties) {
+        return new XiaohongshuTools(xiaohongshuMcpClient, properties);
     }
 
     // -------------------------------------------------------------------------

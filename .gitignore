@@ -1,10 +1,12 @@
 HELP.md
 target/
+data/memorytool/
 
 ### Secrets ###
 .env
 *.log
 *.bak
+tools/xiaohongshu-mcp/**/cookies.json
 src/main/resources/application.properties
 application-local.yaml
 config/application-local.yaml
