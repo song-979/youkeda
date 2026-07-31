@@ -29,6 +29,28 @@ public class AutomationRuntime implements InitializingBean {
 
     private static final Logger log = LoggerFactory.getLogger(AutomationRuntime.class);
 
+    /**
+     * Current end user on whose behalf a tool call is running. Set by the message
+     * router before the orchestration loop so reminders/tasks created by tools can
+     * be attributed to (and dispatched back to) the creating user.
+     */
+    private static final ThreadLocal<String> CURRENT_USER = new ThreadLocal<>();
+
+    public static void setCurrentUser(String userId) {
+        if (userId != null && !userId.isBlank()) {
+            CURRENT_USER.set(userId);
+        }
+    }
+
+    public static void clearCurrentUser() {
+        CURRENT_USER.remove();
+    }
+
+    /** Current user id, or null when running outside a user message context. */
+    public static String currentUserId() {
+        return CURRENT_USER.get();
+    }
+
     private final AutomationStore store;
     private final ReminderScheduler scheduler;
     private final ReminderDispatcher dispatcher;
@@ -74,8 +96,23 @@ public class AutomationRuntime implements InitializingBean {
 
     @Override
     public void afterPropertiesSet() {
+        recoverStaleTriggeringReminders();
         reschedulePendingReminders();
         scheduleRecurringTasks();
+    }
+
+    /**
+     * Reminders that were in TRIGGERING state when the process died would otherwise be
+     * stuck forever (not rescheduled, not cancellable, not deletable). Reset them to
+     * PENDING on startup so the normal recovery path picks them up again.
+     */
+    private void recoverStaleTriggeringReminders() {
+        for (AutomationStore.Reminder reminder : store.listReminders(AutomationStore.ReminderStatus.TRIGGERING)) {
+            log.warn("recovering stale TRIGGERING reminder back to PENDING: id={}, title={}",
+                    reminder.id(), reminder.title());
+            store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.PENDING,
+                    "recovered from stale TRIGGERING state on startup", 0));
+        }
     }
 
     public ReminderResult createReminder(String title, String remindAtText, String message) {
@@ -117,7 +154,8 @@ public class AutomationRuntime implements InitializingBean {
                 0,
                 AutomationStore.AutomationActionType.TEXT,
                 null,
-                null);
+                null)
+                .withOwnerId(currentUserId());
         store.saveReminder(reminder);
         scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
         log.info("TEXT_REMINDER created successfully: id={}, title={}, remindAt={}",
@@ -337,6 +375,12 @@ public class AutomationRuntime implements InitializingBean {
             return ReminderResult.failure("reminder recipient is not bound yet");
         }
 
+        // Dedup: model retries within a short window must not create duplicate tasks
+        Optional<AutomationStore.Reminder> duplicate = findRecentDuplicate(normalizedTitle, remindAt, normalizedMessage, now);
+        if (duplicate.isPresent()) {
+            return ReminderResult.success(duplicate.get(), "duplicate reminder already exists");
+        }
+
         AutomationStore.Reminder reminder = new AutomationStore.Reminder(
                 newReminderId(),
                 normalizedTitle,
@@ -354,7 +398,8 @@ public class AutomationRuntime implements InitializingBean {
                 instruction,
                 originalRequest,
                 expectedToolCategories,
-                maxRetries);
+                maxRetries)
+                .withOwnerId(currentUserId());
         store.saveReminder(reminder);
         scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
         String kindLabel = taskKind == AutomationStore.AutomationTaskKind.LLM_TASK ? "LLM_TASK" : "TEXT_REMINDER";
@@ -593,7 +638,8 @@ public class AutomationRuntime implements InitializingBean {
                 instruction,
                 originalRequest,
                 expectedToolCategories,
-                maxRetries);
+                maxRetries)
+                .withOwnerId(currentUserId());
         store.saveRecurringTask(task);
         scheduleRecurringInstance(task);
         return RecurringTaskResult.success(task,
@@ -627,23 +673,21 @@ public class AutomationRuntime implements InitializingBean {
     }
 
     void triggerReminder(String reminderId) {
-        Optional<AutomationStore.Reminder> existing = store.findReminder(reminderId);
-        if (existing.isEmpty()) {
-            return;
-        }
-        AutomationStore.Reminder reminder = existing.get();
-        if (reminder.status() != AutomationStore.ReminderStatus.PENDING) {
-            return;
-        }
-
-        AutomationStore.Reminder triggering = copyReminder(
-                reminder,
+        // Atomically claim PENDING -> TRIGGERING. If another thread (scheduler or the
+        // overdue-retry path) already claimed this reminder, we lose the race and stop.
+        Optional<AutomationStore.Reminder> claimed = store.transitionReminderStatus(
+                reminderId,
+                AutomationStore.ReminderStatus.PENDING,
                 AutomationStore.ReminderStatus.TRIGGERING,
-                null,
-                reminder.sendAttempts());
-        store.saveReminder(triggering);
+                clock.instant());
+        if (claimed.isEmpty()) {
+            return;
+        }
+        AutomationStore.Reminder triggering = claimed.get();
 
-        String recipientId = resolveRecipientId();
+        // Per-owner routing: reminders created by a specific user go back to that user;
+        // legacy reminders without an owner fall back to the global recipient binding.
+        String recipientId = resolveRecipientIdFor(triggering);
         if (recipientId == null) {
             store.saveReminder(copyReminder(
                     triggering,
@@ -828,12 +872,18 @@ public class AutomationRuntime implements InitializingBean {
         if (triggeredByUserId == null || triggeredByUserId.isBlank()) {
             return;
         }
-        String recipientId = resolveRecipientId();
-        if (recipientId == null || !recipientId.equals(triggeredByUserId)) {
-            return;
-        }
         Instant now = clock.instant();
         for (AutomationStore.Reminder reminder : store.listReminders(AutomationStore.ReminderStatus.PENDING)) {
+            // Only retry reminders owned by the messaging user; legacy reminders without
+            // an owner are retried when the globally bound recipient sends a message.
+            String owner = reminder.ownerId();
+            boolean ownedByTriggeringUser = owner != null && owner.equals(triggeredByUserId);
+            String boundRecipient = resolveRecipientId();
+            boolean legacyOwned = owner == null && boundRecipient != null
+                    && boundRecipient.equals(triggeredByUserId);
+            if (!ownedByTriggeringUser && !legacyOwned) {
+                continue;
+            }
             if (!reminder.remindAt().isAfter(now)) {
                 log.info("retrying overdue pending reminder: id={}, title={}", reminder.id(), reminder.title());
                 triggerReminder(reminder.id());
@@ -890,6 +940,17 @@ public class AutomationRuntime implements InitializingBean {
                 .orElse(null);
     }
 
+    /**
+     * Route a reminder to its owner when known; fall back to the global recipient
+     * binding for legacy reminders created before per-user ownership existed.
+     */
+    private String resolveRecipientIdFor(AutomationStore.Reminder reminder) {
+        if (reminder.ownerId() != null && !reminder.ownerId().isBlank()) {
+            return reminder.ownerId();
+        }
+        return resolveRecipientId();
+    }
+
     private AutomationStore.Reminder copyReminder(AutomationStore.Reminder reminder,
                                                   AutomationStore.ReminderStatus status,
                                                   String failureMessage,
@@ -911,7 +972,8 @@ public class AutomationRuntime implements InitializingBean {
                 reminder.instruction(),
                 reminder.originalRequest(),
                 reminder.expectedToolCategories(),
-                effectiveMaxRetries(reminder));
+                effectiveMaxRetries(reminder),
+                reminder.ownerId());
     }
 
     private Instant parseInstant(String value) {
@@ -943,15 +1005,15 @@ public class AutomationRuntime implements InitializingBean {
     }
 
     private static String newReminderId() {
-        return "R-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        return "R-" + UUID.randomUUID().toString().substring(0, 12).toUpperCase(Locale.ROOT);
     }
 
     private static String newScheduleId() {
-        return "S-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        return "S-" + UUID.randomUUID().toString().substring(0, 12).toUpperCase(Locale.ROOT);
     }
 
     private static String newRecurringTaskId() {
-        return "RR-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        return "RR-" + UUID.randomUUID().toString().substring(0, 12).toUpperCase(Locale.ROOT);
     }
 
     private Instant computeNextRunAt(AutomationStore.RecurringScheduleType scheduleType,
@@ -1021,7 +1083,8 @@ public class AutomationRuntime implements InitializingBean {
                 task.instruction(),
                 task.originalRequest(),
                 task.expectedToolCategories(),
-                effectiveMaxRetries(task));
+                effectiveMaxRetries(task))
+                .withOwnerId(task.ownerId());
         store.saveReminder(reminder);
         scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
     }
@@ -1074,7 +1137,8 @@ public class AutomationRuntime implements InitializingBean {
                 task.instruction(),
                 task.originalRequest(),
                 task.expectedToolCategories(),
-                effectiveMaxRetries(task));
+                effectiveMaxRetries(task),
+                task.ownerId());
     }
 
     private void pauseRecurringTaskIfNeeded(AutomationStore.Reminder reminder, String failureMessage) {
@@ -1225,7 +1289,16 @@ public class AutomationRuntime implements InitializingBean {
         @Override
         public void schedule(AutomationStore.Reminder reminder, Runnable task) {
             cancel(reminder.id());
-            ScheduledFuture<?> future = taskScheduler.schedule(task, reminder.remindAt());
+            // Wrap the task so the future entry is removed once the task has run;
+            // otherwise the futures map grows unboundedly with every fired reminder.
+            Runnable selfCleaning = () -> {
+                try {
+                    task.run();
+                } finally {
+                    futures.remove(reminder.id());
+                }
+            };
+            ScheduledFuture<?> future = taskScheduler.schedule(selfCleaning, reminder.remindAt());
             if (future != null) {
                 futures.put(reminder.id(), future);
             }
