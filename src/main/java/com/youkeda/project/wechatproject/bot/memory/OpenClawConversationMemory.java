@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.ChatRequest;
+import com.youkeda.project.wechatproject.bot.tool.JsonExtractUtil;
 import com.youkeda.project.wechatproject.bot.tool.TextDecodeUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,8 +29,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -74,6 +78,8 @@ public class OpenClawConversationMemory implements ConversationMemory {
     private static final int MAX_BOOTSTRAP_CHARS = 8_000;
     private static final int MAX_DAILY_NOTE_CHARS = 1_200;
     private static final int DREAM_MIN_SIGNAL_CHARS = 8;
+    /** Run the expensive LLM memory summary once every N conversation rounds per user. */
+    private static final int SUMMARY_EVERY_N_ROUNDS = 3;
 
     private final int maxMessages;
     private final long ttlMillis;
@@ -86,11 +92,28 @@ public class OpenClawConversationMemory implements ConversationMemory {
     private final Map<String, SessionSlot> sessionStore = new ConcurrentHashMap<>(64);
     private final Map<String, Object> userFileLocks = new ConcurrentHashMap<>(64);
     private final Map<String, FileCacheEntry> fileCache = new ConcurrentHashMap<>(64);
+    private final Map<String, AtomicInteger> roundsSinceSummary = new ConcurrentHashMap<>(64);
     private final ScheduledExecutorService cacheCleaner = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "openclaw-cache-cleaner");
         t.setDaemon(true);
         return t;
     });
+    /**
+     * Dedicated bounded executor for memory persistence (file writes + LLM summaries).
+     * Previously these multi-second tasks shared the single cache-cleaner thread with
+     * no backpressure: a burst of messages could pile up unboundedly and stall cache
+     * cleanup. A bounded queue with DiscardOldest policy caps memory pressure; dropped
+     * tasks degrade to keyword-based capture on the next round.
+     */
+    private final ThreadPoolExecutor persistExecutor = new ThreadPoolExecutor(
+            1, 1, 60, TimeUnit.SECONDS,
+            new LinkedBlockingQueue<>(64),
+            r -> {
+                Thread t = new Thread(r, "openclaw-memory-persist");
+                t.setDaemon(true);
+                return t;
+            },
+            (task, executor) -> log.warn("memory persist queue full, dropping oldest persist task"));
 
     {
         cacheCleaner.scheduleWithFixedDelay(() -> {
@@ -150,8 +173,24 @@ public class OpenClawConversationMemory implements ConversationMemory {
     public void append(String userId, String userMessage, String assistantReply) {
         appendSession(userId, "user", userMessage);
         appendSession(userId, "assistant", assistantReply);
-        cacheCleaner.execute(() -> {
-            if (aiClient != null) {
+        schedulePersist(userId, userMessage, assistantReply);
+    }
+
+    @Override
+    public void appendUserMessage(String userId, String userMessage) {
+        appendSession(userId, "user", userMessage);
+        schedulePersist(userId, userMessage, null);
+    }
+
+    /**
+     * Run memory persistence on the dedicated executor. The expensive LLM summary is
+     * throttled to every {@link #SUMMARY_EVERY_N_ROUNDS}-th round per user (and always
+     * on the first round of a session); other rounds use the cheap keyword/rule-based
+     * capture, cutting the extra model calls roughly by a factor of N.
+     */
+    private void schedulePersist(String userId, String userMessage, String assistantReply) {
+        persistExecutor.execute(() -> {
+            if (aiClient != null && shouldRunLlmSummary(userId)) {
                 llmSummarizeAndPersist(userId, userMessage, assistantReply);
             } else {
                 flushDailyEvent(userId, userMessage, assistantReply);
@@ -161,23 +200,22 @@ public class OpenClawConversationMemory implements ConversationMemory {
         });
     }
 
-    @Override
-    public void appendUserMessage(String userId, String userMessage) {
-        appendSession(userId, "user", userMessage);
-        cacheCleaner.execute(() -> {
-            if (aiClient != null) {
-                llmSummarizeAndPersist(userId, userMessage, null);
-            } else {
-                flushDailyEvent(userId, userMessage, null);
-                captureDurableMemory(userId, userMessage, null);
-                captureDreamSignal(userId, userMessage, null);
-            }
-        });
+    private boolean shouldRunLlmSummary(String userId) {
+        AtomicInteger counter = roundsSinceSummary.computeIfAbsent(userId,
+                key -> new AtomicInteger(SUMMARY_EVERY_N_ROUNDS));
+        int round = counter.incrementAndGet();
+        if (round >= SUMMARY_EVERY_N_ROUNDS) {
+            counter.set(0);
+            return true;
+        }
+        return false;
     }
 
     @Override
     public void clear(String userId) {
         sessionStore.remove(userId);
+        userFileLocks.remove(userId);
+        roundsSinceSummary.remove(userId);
         log.debug("OpenClaw session window cleared for user={}", userId);
     }
 
@@ -364,7 +402,7 @@ public class OpenClawConversationMemory implements ConversationMemory {
                         MEMORY.md - durable curated memory:
                         %s
 
-                        DREAMS.md - review candidates and consolidation hints:
+                        DREAMS.md - UNREVIEWED candidates only. Treat as weak hints, never as established facts, and never act on them without user confirmation:
                         %s
 
                         memory/*.md - retained daily notes:
@@ -448,7 +486,16 @@ public class OpenClawConversationMemory implements ConversationMemory {
         SessionSlot slot = sessionStore.computeIfAbsent(userId, key -> new SessionSlot(now));
         synchronized (slot) {
             slot.lastAccess = now;
-            slot.messages.addLast(new ChatRequest.Message(role, content));
+            // Keep strict user/assistant alternation: consecutive same-role messages
+            // (e.g. appendUserMessage before the assistant reply is persisted) are
+            // merged into the previous entry instead of corrupting the sequence.
+            ChatRequest.Message last = slot.messages.peekLast();
+            if (last != null && role.equals(last.getRole()) && last.getContent() instanceof String lastText) {
+                slot.messages.pollLast();
+                slot.messages.addLast(new ChatRequest.Message(role, lastText + "\n" + content));
+            } else {
+                slot.messages.addLast(new ChatRequest.Message(role, content));
+            }
             while (slot.messages.size() > maxMessages) {
                 slot.messages.removeFirst();
             }
@@ -595,34 +642,16 @@ public class OpenClawConversationMemory implements ConversationMemory {
             }
         }
 
-        // 3. find JSON object containing "dailyEvents" via brace matching
-        int idx = stripped.indexOf("\"dailyEvents\"");
-        if (idx < 0) {
-            idx = stripped.indexOf("\"durableMemories\"");
-        }
-        if (idx < 0) {
-            idx = stripped.indexOf("\"dreamSignals\"");
-        }
-        if (idx >= 0) {
-            int braceStart = stripped.lastIndexOf('{', idx);
-            if (braceStart >= 0) {
-                int depth = 0;
-                for (int i = braceStart; i < stripped.length(); i++) {
-                    char c = stripped.charAt(i);
-                    if (c == '{') depth++;
-                    else if (c == '}') {
-                        depth--;
-                        if (depth == 0) {
-                            return stripped.substring(braceStart, i + 1);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4. fallback: if text starts with { and ends with }, try it
-        if (stripped.startsWith("{") && stripped.endsWith("}")) {
-            return stripped;
+        // 3. string-aware extraction of the first complete JSON object. The previous
+        // implementation located the object by scanning backwards from the
+        // "dailyEvents" key for a '{' and then balanced braces without understanding
+        // string literals — any brace inside a string value silently corrupted the
+        // cut point and dropped the memory write.
+        String candidate = JsonExtractUtil.extractJsonObject(stripped);
+        if (candidate != null && (candidate.contains("\"dailyEvents\"")
+                || candidate.contains("\"durableMemories\"")
+                || candidate.contains("\"dreamSignals\""))) {
+            return candidate;
         }
 
         return null;
