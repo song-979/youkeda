@@ -1,5 +1,7 @@
 package com.youkeda.project.wechatproject.bot.agent;
 
+import com.youkeda.project.wechatproject.bot.tool.chat.RagTools;
+import com.youkeda.project.wechatproject.bot.tool.travel.DiDiTaxiTools;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,11 +32,17 @@ public class AgentBus {
 
     /**
      * Synchronously delegate a task to another agent and wait for the result.
+     * <p>
+     * If the task carries a userId, the per-user tool context (RAG / DiDi thread-locals)
+     * is installed for the duration of the call. This is what makes context propagation
+     * work on virtual threads spawned by {@link #delegateParallel(Map)}, where
+     * thread-locals from the caller thread would otherwise be lost.
      */
     public AgentResult delegate(String agentName, AgentTask task) {
         AgentUnit target = registry.get(agentName);
         log.info("AgentBus: delegating to {} (instruction preview: {})",
                 agentName, preview(task.instruction()));
+        boolean contextInstalled = installUserContext(task.userId());
         try {
             AgentResult result = target.execute(task);
             log.info("AgentBus: {} result status={}", agentName, result.status());
@@ -42,7 +50,21 @@ public class AgentBus {
         } catch (IOException e) {
             log.error("AgentBus: {} delegation failed: {}", agentName, e.getMessage());
             return AgentResult.failed(task.taskId(), agentName + " delegation failed: " + e.getMessage());
+        } finally {
+            if (contextInstalled) {
+                RagTools.clearCurrentUser();
+                DiDiTaxiTools.clearCurrentUser();
+            }
         }
+    }
+
+    private boolean installUserContext(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return false;
+        }
+        RagTools.setCurrentUser(userId);
+        DiDiTaxiTools.setCurrentUser(userId);
+        return true;
     }
 
     /**
