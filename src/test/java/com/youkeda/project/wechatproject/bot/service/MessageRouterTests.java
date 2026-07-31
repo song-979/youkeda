@@ -6,6 +6,7 @@ import com.youkeda.project.wechatproject.bot.agent.AgentResult;
 import com.youkeda.project.wechatproject.bot.agent.AgentTask;
 import com.youkeda.project.wechatproject.bot.agent.AgentUnit;
 import com.youkeda.project.wechatproject.bot.router.MessageRouter;
+import com.youkeda.project.wechatproject.bot.router.SimpleModeRouter;
 import com.youkeda.project.wechatproject.bot.model.ModelReply;
 import com.youkeda.project.wechatproject.bot.orchestrator.OrchestrationResult;
 import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorAgent;
@@ -42,7 +43,8 @@ class MessageRouterTests {
                 null,
                 null,
                 null,
-                properties);
+                properties,
+                new SimpleModeRouter(registry, null));
 
         ModelReply reply = router.route(
                 "user-1",
@@ -67,7 +69,8 @@ class MessageRouterTests {
                 null,
                 null,
                 null,
-                properties);
+                properties,
+                new SimpleModeRouter(registry, null));
 
         router.route(
                 "user-1",
@@ -98,7 +101,8 @@ class MessageRouterTests {
                 null,
                 null,
                 null,
-                properties);
+                properties,
+                new SimpleModeRouter(registry, null));
 
         ModelReply reply = router.route("user-1", "\u4f60\u597d", List.of());
 
