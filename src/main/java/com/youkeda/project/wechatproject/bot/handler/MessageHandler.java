@@ -19,6 +19,7 @@ import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
 
 import javax.imageio.IIOImage;
@@ -37,9 +38,12 @@ import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
-public class MessageHandler implements OnMessageListener, InitializingBean {
+public class MessageHandler implements OnMessageListener, InitializingBean, DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(MessageHandler.class);
 
@@ -60,6 +64,13 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     private final DocumentService documentService;
     private final AutomationRuntime automationRuntime;
     private final RagStore ragStore;
+    /**
+     * Messages are processed on virtual threads so a slow task (browser automation,
+     * large file parsing, multi-round orchestration) never blocks the iLink SDK
+     * polling thread or other users' messages. Per-user ordering and memory
+     * consistency are still guaranteed by the per-user lock inside MessageRouter.
+     */
+    private final ExecutorService messageExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     public MessageHandler(ILinkClient ilinkClient,
                           MessageBridge messageBridge,
@@ -86,9 +97,28 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     }
 
     @Override
+    public void destroy() {
+        messageExecutor.shutdown();
+        try {
+            if (!messageExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                messageExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            messageExecutor.shutdownNow();
+        }
+    }
+
+    @Override
     public void onMessages(List<WeixinMessage> messages) {
         for (WeixinMessage msg : messages) {
-            handleMessage(msg);
+            messageExecutor.submit(() -> {
+                try {
+                    handleMessage(msg);
+                } catch (Exception e) {
+                    log.error("async message handling failed", e);
+                }
+            });
         }
     }
 
@@ -132,6 +162,10 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         }
 
         try {
+            // Progress hint must go out BEFORE routing starts — routing can take
+            // seconds to minutes (orchestration, browser tasks). Sending it inside
+            // dispatch() meant the user got the hint together with the final result.
+            trySendProgress(fromUserId, "正在思考...");
             ModelReply reply = router.route(fromUserId, text, imageBase64Urls);
             dispatch(fromUserId, reply);
             log.info("reply dispatched to user={}, type={}", fromUserId, reply.getType());
@@ -154,18 +188,13 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
 
     private void dispatch(String toUser, ModelReply reply) throws IOException {
         switch (reply.getType()) {
-            case TEXT -> {
-                trySendProgress(toUser, "正在思考...");
-                ilinkClient.sendText(toUser, reply.getTextContent());
-            }
+            case TEXT -> ilinkClient.sendText(toUser, reply.getTextContent());
             case IMAGE -> {
-                trySendProgress(toUser, "正在生成图片，请稍候...");
                 for (ModelReply.ImagePayload img : reply.getImages()) {
                     sendImageWithFallback(toUser, img);
                 }
             }
             case MIXED -> {
-                trySendProgress(toUser, mixedProgressMessage(reply));
                 if (reply.getTextContent() != null && !reply.getTextContent().isBlank()) {
                     ilinkClient.sendText(toUser, reply.getTextContent());
                 }
@@ -180,12 +209,8 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
                     sendAudioAsFile(toUser, reply.getAudioPayload());
                 }
             }
-            case VOICE -> {
-                trySendProgress(toUser, "正在生成语音，请稍候...");
-                sendAudioAsFile(toUser, reply.getAudioPayload());
-            }
+            case VOICE -> sendAudioAsFile(toUser, reply.getAudioPayload());
             case FILE -> {
-                trySendProgress(toUser, "正在生成文件，请稍候...");
                 ModelReply.FilePayload file = reply.getFilePayload();
                 ilinkClient.sendFile(toUser, file.bytes(), file.fileName(), null);
             }
@@ -201,35 +226,6 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         }
         byte[] mp3Bytes = audioConverter.wavToMp3(audio.bytes());
         ilinkClient.sendFile(toUser, mp3Bytes, "tts.mp3", null);
-    }
-
-    private static String mixedProgressMessage(ModelReply reply) {
-        boolean hasImage = !reply.getImages().isEmpty();
-        boolean hasAudio = reply.getAudioPayload() != null;
-        boolean hasFile = reply.getFilePayload() != null;
-
-        if (hasImage && hasAudio && hasFile) {
-            return "正在生成图片、语音和文件，请稍候...";
-        }
-        if (hasImage && hasAudio) {
-            return "正在生成图片和语音，请稍候...";
-        }
-        if (hasImage && hasFile) {
-            return "正在生成图片和文件，请稍候...";
-        }
-        if (hasAudio && hasFile) {
-            return "正在生成语音和文件，请稍候...";
-        }
-        if (hasImage) {
-            return "正在生成图片，请稍候...";
-        }
-        if (hasAudio) {
-            return "正在生成语音，请稍候...";
-        }
-        if (hasFile) {
-            return "正在生成文件，请稍候...";
-        }
-        return "正在处理...";
     }
 
     private void sendImageWithFallback(String toUser, ModelReply.ImagePayload image) {
