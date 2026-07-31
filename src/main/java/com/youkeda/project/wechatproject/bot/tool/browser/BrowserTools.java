@@ -72,6 +72,8 @@ public class BrowserTools implements ToolService.ProjectTool {
     private final AtomicInteger restartAttempts = new AtomicInteger(0);
     private final AtomicInteger successfulCallCount = new AtomicInteger(0);
     private static final int MAX_RESTART_ATTEMPTS = 3;
+    /** Hard cap on any single browser tool result so huge page snapshots cannot flood the LLM context. */
+    private static final int MAX_TOOL_RESULT_CHARS = 20_000;
 
     // Sensitive headers to redact from network responses
     private static final String[] SENSITIVE_HEADERS = {
@@ -146,13 +148,30 @@ public class BrowserTools implements ToolService.ProjectTool {
             }
             auditLogger.logAction(userId, toolName, urlForAudit,
                     System.currentTimeMillis() - start, true, "OK");
-            return result;
+            // Snapshots of large pages (full a11y trees) can be hundreds of KB; an
+            // unbounded tool result would blow up the LLM context window.
+            return truncateToolResult(result);
         } catch (Exception e) {
             auditLogger.logAction(userId, toolName, urlForAudit,
                     System.currentTimeMillis() - start, false, e.getMessage());
             auditLogger.logError(userId, toolName, urlForAudit, e);
-            throw new BrowserMcpException("TOOL_ERROR", toolName + " failed: " + e.getMessage());
+            // error-as-result: surface the failure to the LLM so it can adapt (retry
+            // with different arguments, take a different path, or inform the user)
+            // instead of throwing out of the tool-calling loop and losing the task.
+            return "Error: " + toolName + " failed: " + e.getMessage()
+                    + ". You may retry with adjusted arguments or report the failure to the user.";
         }
+    }
+
+    private static String truncateToolResult(String result) {
+        if (result == null || result.length() <= MAX_TOOL_RESULT_CHARS) {
+            return result;
+        }
+        log.info("truncating oversized browser tool result: {} -> {} chars",
+                result.length(), MAX_TOOL_RESULT_CHARS);
+        return result.substring(0, MAX_TOOL_RESULT_CHARS)
+                + "\n...[truncated: result was " + result.length()
+                + " chars, showing first " + MAX_TOOL_RESULT_CHARS + "]";
     }
 
     // -------------------------------------------------------------------------
