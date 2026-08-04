@@ -19,6 +19,7 @@ public class BrowserMcpProperties {
     private List<String> urlAllowlist;
     private List<String> urlBlocklist;
     private boolean scriptEvaluationEnabled = false;
+    private boolean richTextWriteEnabled = true;
     private Duration idleTimeout = Duration.ofMinutes(5);
     private Duration startupHealthCheckTimeout = Duration.ofSeconds(3);
     private Duration crashCooldown = Duration.ofSeconds(30);
@@ -56,6 +57,9 @@ public class BrowserMcpProperties {
 
     public boolean isScriptEvaluationEnabled() { return scriptEvaluationEnabled; }
     public void setScriptEvaluationEnabled(boolean scriptEvaluationEnabled) { this.scriptEvaluationEnabled = scriptEvaluationEnabled; }
+
+    public boolean isRichTextWriteEnabled() { return richTextWriteEnabled; }
+    public void setRichTextWriteEnabled(boolean richTextWriteEnabled) { this.richTextWriteEnabled = richTextWriteEnabled; }
 
     public Duration getIdleTimeout() { return idleTimeout; }
     public void setIdleTimeout(Duration idleTimeout) { this.idleTimeout = idleTimeout; }

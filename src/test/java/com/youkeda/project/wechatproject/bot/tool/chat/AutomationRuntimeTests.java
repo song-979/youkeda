@@ -188,6 +188,43 @@ class AutomationRuntimeTests {
     }
 
     @Test
+    void reminderIsOwnedAndDispatchedToItsCreatingUser() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderDispatcher dispatcher = new RecordingReminderDispatcher();
+        AutomationRuntime runtime = newRuntime(store, new RecordingReminderScheduler(), dispatcher);
+        AutomationRuntime.setCurrentUser("owner-a@im.wechat");
+        AutomationRuntime.ReminderResult created;
+        try {
+            created = runtime.createReminder("private", "2026-07-22T20:00:00+08:00", "private message");
+        } finally {
+            AutomationRuntime.clearCurrentUser();
+        }
+
+        runtime.triggerReminder(created.reminder().id());
+
+        assertThat(created.reminder().ownerId()).isEqualTo("owner-a@im.wechat");
+        assertThat(dispatcher.recipientIds).containsExactly("owner-a@im.wechat");
+    }
+
+    @Test
+    void ownerlessLegacyReminderDoesNotUseMutableLastUserBinding() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderDispatcher dispatcher = new RecordingReminderDispatcher();
+        Instant now = FIXED_CLOCK.instant();
+        store.saveRecipientBinding(new AutomationStore.RecipientBinding("other-user@im.wechat", now, now));
+        store.saveReminder(new AutomationStore.Reminder("legacy", "legacy", now, "private legacy message",
+                AutomationStore.ReminderStatus.PENDING, now, now, null, 0));
+        AutomationRuntime runtime = new AutomationRuntime(store, new RecordingReminderScheduler(), dispatcher,
+                new AutomationProperties(), FIXED_CLOCK);
+
+        runtime.triggerReminder("legacy");
+
+        assertThat(dispatcher.recipientIds).isEmpty();
+        assertThat(store.findReminder("legacy")).map(AutomationStore.Reminder::status)
+                .contains(AutomationStore.ReminderStatus.FAILED);
+    }
+
+    @Test
     void dailyRecurringReminderCreatesNextPendingReminderAndAdvancesAfterTrigger() {
         RecordingReminderScheduler scheduler = new RecordingReminderScheduler();
         RecordingReminderDispatcher dispatcher = new RecordingReminderDispatcher();

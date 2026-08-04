@@ -42,6 +42,8 @@ public class BrowserSecurityPolicy {
 
     // Max human login requests per session
     private static final int MAX_LOGIN_REQUESTS = 3;
+    private static final int MAX_RICH_TEXT_CHARS = 200_000;
+    private static final int MAX_SELECTOR_CHARS = 500;
 
     private final BrowserMcpProperties properties;
     private int loginRequestCount = 0;
@@ -140,6 +142,26 @@ public class BrowserSecurityPolicy {
                 throw new BrowserSecurityException("Script contains dangerous operation: " + dangerous
                         + ". Only read-only DOM operations (querySelector, innerText, textContent, getAttribute) are allowed.");
             }
+        }
+    }
+
+    /**
+     * Validate controlled rich-text writes. This does not allow arbitrary user scripts;
+     * BrowserTools generates the script from plain text and an optional CSS selector.
+     */
+    public void validateRichTextWrite(String text, String selector) {
+        if (!properties.isRichTextWriteEnabled()) {
+            throw new BrowserSecurityException("Rich text writing is disabled. Enable agent.tools.browser.rich-text-write-enabled to use this feature.");
+        }
+        if (text == null) {
+            throw new BrowserSecurityException("Rich text content must not be null");
+        }
+        if (text.length() > MAX_RICH_TEXT_CHARS) {
+            throw new BrowserSecurityException("Rich text content is too large: " + text.length()
+                    + " chars. Maximum is " + MAX_RICH_TEXT_CHARS + ".");
+        }
+        if (selector != null && selector.length() > MAX_SELECTOR_CHARS) {
+            throw new BrowserSecurityException("CSS selector is too long. Maximum is " + MAX_SELECTOR_CHARS + " chars.");
         }
     }
 

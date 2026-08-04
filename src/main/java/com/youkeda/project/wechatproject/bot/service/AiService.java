@@ -59,6 +59,7 @@ public final class AiService {
         private String model;
         private double temperature;
         private int maxTokens;
+        private int contextWindowTokens = 128_000;
         private String systemPrompt;
         private int connectTimeoutMs;
         private int readTimeoutMs;
@@ -73,8 +74,14 @@ public final class AiService {
         private String intentModel;
         private String intentApiUrl;
         private String intentApiKey;
+        private int intentReadTimeoutMs = 45_000;
+        private String complexityModel;
+        private int complexityReadTimeoutMs = 3_000;
 
         private int toolCallTimeoutSeconds = 180;
+        /** Per-round timeout for each LLM call within the tool loop (0 = disabled, uses toolCallTimeoutSeconds). */
+        private int toolCallPerRoundTimeoutSeconds = 0;
+        private int toolCallMaxRounds = 20;
         private int maxHistoryRounds = 10;
         private int memoryTtlMinutes = 30;
         private String memoryBasePath = "data/memory";
@@ -113,6 +120,11 @@ public final class AiService {
         public int getMaxTokens() { return maxTokens; }
         public void setMaxTokens(int maxTokens) { this.maxTokens = maxTokens; }
 
+        public int getContextWindowTokens() { return contextWindowTokens; }
+        public void setContextWindowTokens(int contextWindowTokens) {
+            this.contextWindowTokens = Math.max(1, contextWindowTokens);
+        }
+
         public String getSystemPrompt() { return systemPrompt; }
         public void setSystemPrompt(String systemPrompt) { this.systemPrompt = systemPrompt; }
 
@@ -149,6 +161,19 @@ public final class AiService {
         public String getIntentApiKey() { return intentApiKey; }
         public void setIntentApiKey(String intentApiKey) { this.intentApiKey = intentApiKey; }
 
+        public int getIntentReadTimeoutMs() { return intentReadTimeoutMs; }
+        public void setIntentReadTimeoutMs(int intentReadTimeoutMs) {
+            this.intentReadTimeoutMs = Math.max(1_000, intentReadTimeoutMs);
+        }
+
+        public String getComplexityModel() { return complexityModel; }
+        public void setComplexityModel(String complexityModel) { this.complexityModel = complexityModel; }
+
+        public int getComplexityReadTimeoutMs() { return complexityReadTimeoutMs; }
+        public void setComplexityReadTimeoutMs(int complexityReadTimeoutMs) {
+            this.complexityReadTimeoutMs = Math.max(500, complexityReadTimeoutMs);
+        }
+
         public int getMaxHistoryRounds() { return maxHistoryRounds; }
         public void setMaxHistoryRounds(int maxHistoryRounds) { this.maxHistoryRounds = maxHistoryRounds; }
 
@@ -157,6 +182,18 @@ public final class AiService {
 
         public int getToolCallTimeoutSeconds() { return toolCallTimeoutSeconds; }
         public void setToolCallTimeoutSeconds(int toolCallTimeoutSeconds) { this.toolCallTimeoutSeconds = toolCallTimeoutSeconds; }
+
+        public int getToolCallPerRoundTimeoutSeconds() { return toolCallPerRoundTimeoutSeconds; }
+        public void setToolCallPerRoundTimeoutSeconds(int toolCallPerRoundTimeoutSeconds) { this.toolCallPerRoundTimeoutSeconds = toolCallPerRoundTimeoutSeconds; }
+
+        public int getToolCallMaxRounds() { return toolCallMaxRounds; }
+        public void setToolCallMaxRounds(int toolCallMaxRounds) { this.toolCallMaxRounds = toolCallMaxRounds; }
+
+        /** Backward-compatible alias for the former tool-loop-only context setting. */
+        public int getToolCallMaxContextTokens() { return contextWindowTokens; }
+        public void setToolCallMaxContextTokens(int toolCallMaxContextTokens) {
+            setContextWindowTokens(toolCallMaxContextTokens);
+        }
 
         public String getMemoryBasePath() { return memoryBasePath; }
         public void setMemoryBasePath(String memoryBasePath) { this.memoryBasePath = memoryBasePath; }
@@ -219,6 +256,57 @@ public final class AiService {
                                   List<ChatRequest.Message> history) throws IOException {
             return chat(userMessage, imageBase64Urls, history);
         }
+
+        /**
+         * Executes a fully assembled chat request with per-call model options.
+         * Implementations that do not support overrides retain backward-compatible behavior.
+         */
+        default String chat(List<ChatRequest.Message> messages, ChatCallOptions options) throws IOException {
+            List<ChatRequest.Message> safeMessages = messages != null ? messages : List.of();
+            List<String> systemPrompts = new ArrayList<>();
+            if (options != null && options.systemPrompt() != null && !options.systemPrompt().isBlank()) {
+                systemPrompts.add(options.systemPrompt());
+            }
+            String userMessage = "";
+            List<ChatRequest.Message> history = new ArrayList<>();
+            int lastUserIndex = -1;
+            for (int i = 0; i < safeMessages.size(); i++) {
+                ChatRequest.Message message = safeMessages.get(i);
+                if (message != null && "user".equalsIgnoreCase(message.getRole())) {
+                    lastUserIndex = i;
+                }
+            }
+            for (int i = 0; i < safeMessages.size(); i++) {
+                ChatRequest.Message message = safeMessages.get(i);
+                if (message == null) {
+                    continue;
+                }
+                if ("system".equalsIgnoreCase(message.getRole())) {
+                    String content = String.valueOf(message.getContent());
+                    if (!content.isBlank()) {
+                        systemPrompts.add(content);
+                    }
+                } else if (i == lastUserIndex) {
+                    userMessage = String.valueOf(message.getContent());
+                } else if (!"system".equalsIgnoreCase(message.getRole())) {
+                    history.add(message);
+                }
+            }
+            return chat(userMessage, List.of(), history, String.join("\n\n", systemPrompts));
+        }
+    }
+
+    public record ChatCallOptions(String systemPrompt, String model, Double temperature, Integer maxTokens) {
+        public static ChatCallOptions deterministic(String systemPrompt, String model, int maxTokens) {
+            return new ChatCallOptions(systemPrompt, model, 0.0d, maxTokens);
+        }
+    }
+
+    /** The provider returned HTTP success but no assistant content that callers can safely consume. */
+    public static class EmptyModelResponseException extends IOException {
+        public EmptyModelResponseException(String message) {
+            super(message);
+        }
     }
 
     public interface ImageGenClient {
@@ -235,17 +323,77 @@ public final class AiService {
         private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
         private final AgentProperties props;
+        private final String apiUrl;
+        private final String apiKey;
+        private final String defaultModel;
         private final RestTemplate restTemplate;
 
         public OpenAiCompatibleClient(AgentProperties props) {
+            this(props, props.getApiUrl(), props.getApiKey(), props.getModel());
+        }
+
+        public OpenAiCompatibleClient(AgentProperties props, String apiUrl, String apiKey, String defaultModel) {
             this.props = props;
+            this.apiUrl = apiUrl;
+            this.apiKey = apiKey;
+            this.defaultModel = defaultModel;
             this.restTemplate = createRestTemplate(props);
         }
 
+        public static OpenAiCompatibleClient forIntent(AgentProperties props) {
+            String apiUrl = configuredOrFallback(props.getIntentApiUrl(), props.getApiUrl());
+            String apiKey = configuredOrFallback(props.getIntentApiKey(), props.getApiKey());
+            String model = configuredOrFallback(props.getIntentModel(), props.getModel());
+            int timeoutMs = props.getIntentReadTimeoutMs();
+            int connectTimeoutMs = props.getConnectTimeoutMs() > 0
+                    ? Math.min(props.getConnectTimeoutMs(), timeoutMs) : timeoutMs;
+            return new OpenAiCompatibleClient(
+                    props, apiUrl, apiKey, model, connectTimeoutMs, timeoutMs);
+        }
+
+        public static OpenAiCompatibleClient forComplexity(AgentProperties props) {
+            String apiUrl = configuredOrFallback(props.getIntentApiUrl(), props.getApiUrl());
+            String apiKey = configuredOrFallback(props.getIntentApiKey(), props.getApiKey());
+            String intentModel = configuredOrFallback(props.getIntentModel(), props.getModel());
+            String model = configuredOrFallback(props.getComplexityModel(), intentModel);
+            int timeoutMs = props.getComplexityReadTimeoutMs();
+            int connectTimeoutMs = props.getConnectTimeoutMs() > 0
+                    ? Math.min(props.getConnectTimeoutMs(), timeoutMs) : timeoutMs;
+            return new OpenAiCompatibleClient(
+                    props, apiUrl, apiKey, model,
+                    connectTimeoutMs, timeoutMs);
+        }
+
+        private static String configuredOrFallback(String configured, String fallback) {
+            return configured != null && !configured.isBlank() ? configured : fallback;
+        }
+
+        private OpenAiCompatibleClient(AgentProperties props, String apiUrl, String apiKey,
+                                       String defaultModel, int readTimeoutMs) {
+            this(props, apiUrl, apiKey, defaultModel, props.getConnectTimeoutMs(), readTimeoutMs);
+        }
+
+        private OpenAiCompatibleClient(AgentProperties props, String apiUrl, String apiKey,
+                                       String defaultModel, int connectTimeoutMs, int readTimeoutMs) {
+            this.props = props;
+            this.apiUrl = apiUrl;
+            this.apiKey = apiKey;
+            this.defaultModel = defaultModel;
+            this.restTemplate = createRestTemplate(connectTimeoutMs, readTimeoutMs);
+        }
+
         private static RestTemplate createRestTemplate(AgentProperties props) {
+            return createRestTemplate(props, props.getReadTimeoutMs());
+        }
+
+        private static RestTemplate createRestTemplate(AgentProperties props, int readTimeoutMs) {
+            return createRestTemplate(props.getConnectTimeoutMs(), readTimeoutMs);
+        }
+
+        private static RestTemplate createRestTemplate(int connectTimeoutMs, int readTimeoutMs) {
             SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-            factory.setConnectTimeout(props.getConnectTimeoutMs());
-            factory.setReadTimeout(props.getReadTimeoutMs());
+            factory.setConnectTimeout(connectTimeoutMs);
+            factory.setReadTimeout(readTimeoutMs);
             return new RestTemplate(factory);
         }
 
@@ -261,39 +409,76 @@ public final class AiService {
             return doChat(buildRequest(userMessage, imageBase64Urls, history, false, systemPrompt), imageBase64Urls);
         }
 
+        @Override
+        public String chat(List<ChatRequest.Message> messages, ChatCallOptions options) throws IOException {
+            List<ChatRequest.Message> requestMessages = new ArrayList<>();
+            List<String> systemPrompts = new ArrayList<>();
+            if (options != null && options.systemPrompt() != null && !options.systemPrompt().isBlank()) {
+                systemPrompts.add(options.systemPrompt());
+            }
+            if (messages != null) {
+                messages.stream()
+                        .filter(Objects::nonNull)
+                        .filter(message -> "system".equalsIgnoreCase(message.getRole()))
+                        .map(message -> String.valueOf(message.getContent()))
+                        .filter(content -> !content.isBlank())
+                        .forEach(systemPrompts::add);
+            }
+            String systemPrompt = String.join("\n\n", systemPrompts);
+            if (systemPrompt != null && !systemPrompt.isBlank()) {
+                requestMessages.add(new ChatRequest.Message("system", systemPrompt));
+            }
+            if (messages != null) {
+                requestMessages.addAll(messages.stream()
+                        .filter(Objects::nonNull)
+                        .filter(message -> !"system".equalsIgnoreCase(message.getRole()))
+                        .toList());
+            }
+            String model = options != null && options.model() != null && !options.model().isBlank()
+                    ? options.model() : defaultModel;
+            double temperature = options != null && options.temperature() != null
+                    ? options.temperature() : props.getTemperature();
+            int maxTokens = options != null && options.maxTokens() != null && options.maxTokens() > 0
+                    ? options.maxTokens() : props.getMaxTokens();
+            return doChat(new ChatRequest(model, requestMessages, temperature, maxTokens, false), List.of());
+        }
+
         private String doChat(ChatRequest request, List<String> imageBase64Urls) throws IOException {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.setBearerAuth(props.getApiKey());
+            headers.setBearerAuth(apiKey);
 
             HttpEntity<ChatRequest> entity = new HttpEntity<>(request, headers);
 
             try {
                 ResponseEntity<String> rawResponse = restTemplate.exchange(
-                        props.getApiUrl(), org.springframework.http.HttpMethod.POST, entity, String.class);
+                        apiUrl, org.springframework.http.HttpMethod.POST, entity, String.class);
                 String body = rawResponse.getBody();
                 if (body == null || body.isBlank()) {
                     log.warn("empty response body from AI API");
-                    return "抱歉，AI 服务返回为空，请稍后再试。";
+                    throw new EmptyModelResponseException("AI API returned an empty response body");
                 }
                 // 检查是否返回了 HTML 错误页
                 String trimmed = body.trim();
                 if (trimmed.startsWith("<") || trimmed.startsWith("<!DOCTYPE")) {
                     String preview = trimmed.length() > 500 ? trimmed.substring(0, 500) : trimmed;
                     log.error("AI API returned HTML instead of JSON, url={}, model={}, body preview: {}",
-                            props.getApiUrl(), props.getModel(), preview);
+                            apiUrl, request.getModel(), preview);
                     throw new IOException("AI API returned HTML (likely gateway/proxy error): " + preview);
                 }
                 ChatResponse chatResponse = OBJECT_MAPPER.readValue(trimmed, ChatResponse.class);
-                String content = chatResponse.extractContent();
-                if (content == null || content.isEmpty()) {
-                    log.warn("no content in AI response, choices={}", chatResponse.getChoices());
-                    return "抱歉，AI 未生成有效回复，请稍后再试。";
+                try {
+                    return chatResponse.requireContent();
+                } catch (EmptyModelResponseException e) {
+                    log.warn("no usable content in AI response: id={}, finishReason={}, "
+                                    + "reasoningContentPresent={}, reasoningContentChars={}",
+                            chatResponse.getId(), chatResponse.firstFinishReason(),
+                            chatResponse.hasReasoningContent(), chatResponse.reasoningContentLength());
+                    throw e;
                 }
-                return content;
             } catch (RestClientException e) {
                 String errorMsg = e.getMessage();
-                log.error("AI API call failed: url={}, model={}, error={}", props.getApiUrl(), props.getModel(), errorMsg);
+                log.error("AI API call failed: url={}, model={}, error={}", apiUrl, request.getModel(), errorMsg);
 
                 boolean hasImages = imageBase64Urls != null && !imageBase64Urls.isEmpty();
                 if (hasImages && errorMsg != null
@@ -312,8 +497,8 @@ public final class AiService {
             ChatRequest request = buildRequest(userMessage, imageBase64Urls, history, true, null);
             String requestJson = OBJECT_MAPPER.writeValueAsString(request);
 
-            HttpURLConnectionBridge conn = HttpURLConnectionBridge.open(props.getApiUrl());
-            conn.postJson(requestJson, props.getApiKey(), props.getConnectTimeoutMs(), props.getReadTimeoutMs());
+            HttpURLConnectionBridge conn = HttpURLConnectionBridge.open(apiUrl);
+            conn.postJson(requestJson, apiKey, props.getConnectTimeoutMs(), props.getReadTimeoutMs());
 
             int status = conn.responseCode();
             if (status != 200) {
@@ -374,7 +559,7 @@ public final class AiService {
             }
             messages.add(userMsg);
 
-            return new ChatRequest(props.getModel(), messages, props.getTemperature(), props.getMaxTokens(), stream);
+            return new ChatRequest(defaultModel, messages, props.getTemperature(), props.getMaxTokens(), stream);
         }
 
         private static String extractDeltaContent(String dataJson) {
@@ -876,6 +1061,33 @@ public final class AiService {
             return choice.getMessage().getContent();
         }
 
+        public String requireContent() throws EmptyModelResponseException {
+            String content = extractContent();
+            if (content == null || content.isBlank()) {
+                throw new EmptyModelResponseException(
+                        "AI response contained no usable assistant content");
+            }
+            return content;
+        }
+
+        public String firstFinishReason() {
+            if (choices == null || choices.isEmpty() || choices.get(0) == null) return null;
+            return choices.get(0).getFinishReason();
+        }
+
+        public boolean hasReasoningContent() {
+            return reasoningContentLength() > 0;
+        }
+
+        public int reasoningContentLength() {
+            if (choices == null || choices.isEmpty()) return 0;
+            Choice choice = choices.get(0);
+            if (choice == null || choice.getMessage() == null) return 0;
+            String reasoning = choice.getMessage().getReasoningContent();
+            return reasoning != null ? reasoning.length() : 0;
+        }
+
+        @JsonIgnoreProperties(ignoreUnknown = true)
         public static class Choice {
             @JsonProperty("index")
             private int index;
@@ -896,6 +1108,7 @@ public final class AiService {
             public void setFinishReason(String finishReason) { this.finishReason = finishReason; }
         }
 
+        @JsonIgnoreProperties(ignoreUnknown = true)
         public static class Message {
             @JsonProperty("role")
             private String role;
@@ -903,11 +1116,17 @@ public final class AiService {
             @JsonProperty("content")
             private String content;
 
+            @JsonProperty("reasoning_content")
+            private String reasoningContent;
+
             public String getRole() { return role; }
             public void setRole(String role) { this.role = role; }
 
             public String getContent() { return content; }
             public void setContent(String content) { this.content = content; }
+
+            public String getReasoningContent() { return reasoningContent; }
+            public void setReasoningContent(String reasoningContent) { this.reasoningContent = reasoningContent; }
         }
     }
 

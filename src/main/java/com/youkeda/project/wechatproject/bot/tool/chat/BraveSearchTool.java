@@ -1,6 +1,5 @@
 package com.youkeda.project.wechatproject.bot.tool.chat;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ProjectTool;
@@ -16,10 +15,11 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpStatusCodeException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.Duration;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -92,10 +92,36 @@ public class BraveSearchTool implements ProjectTool {
                     ? results.subList(0, resultCount) : results;
 
             return formatResults(effectiveQuery, limited);
+        } catch (HttpStatusCodeException e) {
+            int status = e.getStatusCode().value();
+            String responseBody = truncate(e.getResponseBodyAsString(), 500);
+            log.warn("web_search provider returned HTTP {} for query={}, body={}",
+                    status, effectiveQuery, responseBody);
+            return httpErrorMessage(effectiveQuery, status);
+        } catch (ResourceAccessException e) {
+            log.warn("web_search provider unavailable for query={}: {}",
+                    effectiveQuery, e.getMessage());
+            return "搜索 \"" + effectiveQuery + "\" 时搜索服务暂时无法访问，请稍后重试。";
         } catch (Exception e) {
             log.error("web_search failed for query={}", effectiveQuery, e);
             return "搜索 \"" + effectiveQuery + "\" 时出错：" + e.getMessage() + "。请稍后重试或尝试其他关键词。";
         }
+    }
+
+    private static String httpErrorMessage(String query, int status) {
+        if (status == 401 || status == 403) {
+            return "搜索服务鉴权失败（HTTP " + status + "），请检查 UAPI Search API Key。";
+        }
+        if (status == 429) {
+            return "搜索服务请求过于频繁（HTTP 429），请稍后重试。";
+        }
+        if (status >= 500) {
+            return "搜索 \"" + query + "\" 时搜索服务暂时不可用（HTTP " + status + "），请稍后重试或尝试其他关键词。";
+        }
+        if (status == 400) {
+            return "搜索 \"" + query + "\" 的请求格式不被搜索服务接受（HTTP 400），请尝试简化关键词。";
+        }
+        return "搜索 \"" + query + "\" 时搜索服务返回错误（HTTP " + status + "），请稍后重试或尝试其他关键词。";
     }
 
     private String formatResults(String query, List<Map<String, Object>> results) {
@@ -136,7 +162,7 @@ public class BraveSearchTool implements ProjectTool {
         return val != null ? val.toString() : "";
     }
 
-    private RestTemplate buildRestTemplate() {
+    protected RestTemplate buildRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofMillis(connectTimeoutMs));
         factory.setReadTimeout(Duration.ofMillis(readTimeoutMs));

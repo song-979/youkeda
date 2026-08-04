@@ -1,18 +1,4 @@
 {
-  "loginContext" : {
-    "botToken" : "5a832854f336@im.bot:0600002ea43446318095ebdb510c6ef5c1ea78",
-    "userId" : "o9cq807d5yyDrD5d1Ul5MpjU_mvc@im.wechat",
-    "botId" : "5a832854f336@im.bot",
-    "baseUrl" : "https://ilinkai.weixin.qq.com"
-  },
-  "updatesCursor" : "ChAIBBCPzdHp+jMYkqaq6fozEjo1YTgzMjg1NGYzMzZAaW0uYm90OjA2MDAwMDJlYTQzNDQ2MzE4MDk1ZWJkYjUxMGM2ZWY1YzFlYTc4",
-  "conversationContexts" : {
-    "o9cq807d5yyDrD5d1Ul5MpjU_mvc@im.wechat" : {
-      "botId" : "5a832854f336@im.bot",
-      "userId" : "o9cq807d5yyDrD5d1Ul5MpjU_mvc@im.wechat",
-      "latestContextToken" : "AARzJWAFAAABAAAAAADSGU69GlU8j/6UyMdpaiAAAAB+9905Q6UiugPBawU3n3cyzQX+LkN8ofRzsCZYN0mt7iofWX6kL9o4S0MN7r9ZRwOWiF9JEyI05gHP8DnL2NiSChNGMzNH",
-      "sourceMessageId" : 7488163577267982728,
-      "sourceMessageTime" : 1785317320080
-    }
-  }
+  "format" : "aes-gcm-v1",
+  "ciphertext" : "GjomhW49JxgzpEF9VT6MuscDxpHnoYYUrqSe5o194zH/TR9ebb1u9gzzo7u5SA4E/fyes9D3oBP/OL5kz2iI82U2Cv5n64L0St/tXMqFOyFf0Qg0eZfpkHA3DHHmgWjE8Y8xW98m+l7xAltXluXcizV4xV/B9yWNGxt288cS9o888FJ2VFqlwIiXoWrJel3DrxYS/ZJ5/+H81A4NGG8fRqeVsIxJYzWY2+oyaxOWXg+Jh/TPD5sf/MY27qQQ2gn9wtD2jdlEFDx+8n07au+/nx153nP2BnmjvPJN1FDch+kaNrz6EnpBwUlDifZDbfUldVTw+9UBSULVVfiiunMmxpE7uHDqir6ulvPgTohDBAfgbRrohXXJRbep/mwi27yap5IyVjKeDYPv3lozpnv/oEJap1d4eA2yDHSRLv9qXpF6hk4wlg4R+H2uyhhg2ii4V57OADT1eeqG/G5Abs0mul/Tqmn/NnD8vGneXdHBkmwkHlai1P9IwApxGBXioAtztUkPKRq1YzCGB1NAfS5fbX6BowFFBIFIBnywkqH194FSfb3/0HP7PoKyiW+rdde0KgYknFqpQf99pjIae6B2jIQ3DY+FQL9d2bPPfIHe9VYtoInSrHPiAnreHSbXbPB7LNisfKsZRco3gd+fgjJaC+Sk1rYw+TLKf0dzI+BIOpAqjz5oecQLZn40T6/7mt+JkxbMpgvrxB4flUcW9OFJJPgLEMtT1xVQJVUE6+3RN6XH+OPN34Qn0GgBu81Kq7hUgeSPHIhSFtsklSJT9wjB9iJYHpTZ+p2uYL3JJjoglEDHTeEejekk3LJ907U8tcIGAqN2GQ2o7QV78cPYnn93LhFxpuoDCFC4QFKr5tcIcaZKwPWGhEjKpVzbHF4UwZvJnQWVjgA1wUmJzBb9ClR80cq54+flSUljKqlLhNht9bHczt+zSMmI7PZlrVlzFPPka7GLaXkVjVEs6jxWdsmlBZIE9c3QAQDGWMqTptylHTR9E8hfh0fsYIrsm0q1poHMWVg5V8DR3SLC3xil32j8dHDEAVHsOULcaMGaGU1Fq4JBLgb+xmhOJjdcX7rfSAzuLOi2s5EXas1BdXdyTZ3TKW+0jhBgKQpUpQmS0uB9Jetlr2Tr9RA6szWiReB1VDGWJsxv"
 }

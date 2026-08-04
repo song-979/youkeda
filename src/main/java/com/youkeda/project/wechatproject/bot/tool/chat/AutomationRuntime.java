@@ -28,6 +28,7 @@ import java.util.concurrent.ScheduledFuture;
 public class AutomationRuntime implements InitializingBean {
 
     private static final Logger log = LoggerFactory.getLogger(AutomationRuntime.class);
+    private static final ThreadLocal<String> CURRENT_USER = new ThreadLocal<>();
 
     private final AutomationStore store;
     private final ReminderScheduler scheduler;
@@ -37,6 +38,22 @@ public class AutomationRuntime implements InitializingBean {
     private final ZoneId zoneId;
     private final WeatherTools weatherTools;
     private final ScheduledTaskExecutor scheduledTaskExecutor;
+
+    public static void setCurrentUser(String userId) {
+        if (userId == null || userId.isBlank()) {
+            CURRENT_USER.remove();
+        } else {
+            CURRENT_USER.set(userId);
+        }
+    }
+
+    public static void clearCurrentUser() {
+        CURRENT_USER.remove();
+    }
+
+    static String currentUserId() {
+        return CURRENT_USER.get();
+    }
 
     public AutomationRuntime(AutomationStore store,
                              ReminderScheduler scheduler,
@@ -74,8 +91,17 @@ public class AutomationRuntime implements InitializingBean {
 
     @Override
     public void afterPropertiesSet() {
+        recoverTriggeringReminders();
         reschedulePendingReminders();
         scheduleRecurringTasks();
+    }
+
+    private void recoverTriggeringReminders() {
+        Instant now = clock.instant();
+        for (AutomationStore.Reminder reminder : store.listReminders(AutomationStore.ReminderStatus.TRIGGERING)) {
+            store.transitionReminderStatus(reminder.id(), AutomationStore.ReminderStatus.TRIGGERING,
+                    AutomationStore.ReminderStatus.PENDING, now);
+        }
     }
 
     public ReminderResult createReminder(String title, String remindAtText, String message) {
@@ -96,7 +122,7 @@ public class AutomationRuntime implements InitializingBean {
         if (!remindAt.isAfter(now)) {
             return ReminderResult.failure("remindAt must be in the future");
         }
-        if (resolveRecipientId() == null) {
+        if (resolveRecipientIdForOwner(currentUserId()) == null) {
             return ReminderResult.failure("reminder recipient is not bound yet");
         }
 
@@ -117,9 +143,10 @@ public class AutomationRuntime implements InitializingBean {
                 0,
                 AutomationStore.AutomationActionType.TEXT,
                 null,
-                null);
+                null)
+                .withOwnerId(currentUserId());
         store.saveReminder(reminder);
-        scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+        scheduleReminder(reminder);
         log.info("TEXT_REMINDER created successfully: id={}, title={}, remindAt={}",
                 reminder.id(), title, remindAt);
         return ReminderResult.success(reminder, "reminder created");
@@ -224,10 +251,11 @@ public class AutomationRuntime implements InitializingBean {
                 reminder.sendAttempts(),
                 effectiveActionType(reminder),
                 reminder.actionTarget(),
-                reminder.recurringTaskId());
+                reminder.recurringTaskId())
+                .withOwnerId(reminder.ownerId());
         store.saveReminder(updated);
         scheduler.cancel(updated.id());
-        scheduler.schedule(updated, () -> triggerReminder(updated.id()));
+        scheduleReminder(updated);
         return ReminderResult.success(updated, "reminder updated");
     }
 
@@ -278,10 +306,11 @@ public class AutomationRuntime implements InitializingBean {
                 normalizeOptional(instruction, reminder.instruction()),
                 normalizeOptional(originalRequest, reminder.originalRequest()),
                 expectedToolCategories != null ? expectedToolCategories : reminder.expectedToolCategories(),
-                effectiveMaxRetries(reminder));
+                effectiveMaxRetries(reminder),
+                reminder.ownerId());
         store.saveReminder(updated);
         scheduler.cancel(updated.id());
-        scheduler.schedule(updated, () -> triggerReminder(updated.id()));
+        scheduleReminder(updated);
         return ReminderResult.success(updated, "llm task updated");
     }
 
@@ -333,8 +362,14 @@ public class AutomationRuntime implements InitializingBean {
         if (!remindAt.isAfter(now)) {
             return ReminderResult.failure("remindAt must be in the future");
         }
-        if (resolveRecipientId() == null) {
+        if (resolveRecipientIdForOwner(currentUserId()) == null) {
             return ReminderResult.failure("reminder recipient is not bound yet");
+        }
+
+        Optional<AutomationStore.Reminder> duplicate = findRecentDuplicate(
+                normalizedTitle, remindAt, normalizedMessage, now);
+        if (duplicate.isPresent()) {
+            return ReminderResult.success(duplicate.get(), "duplicate reminder already exists");
         }
 
         AutomationStore.Reminder reminder = new AutomationStore.Reminder(
@@ -354,9 +389,10 @@ public class AutomationRuntime implements InitializingBean {
                 instruction,
                 originalRequest,
                 expectedToolCategories,
-                maxRetries);
+                maxRetries)
+                .withOwnerId(currentUserId());
         store.saveReminder(reminder);
-        scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+        scheduleReminder(reminder);
         String kindLabel = taskKind == AutomationStore.AutomationTaskKind.LLM_TASK ? "LLM_TASK" : "TEXT_REMINDER";
         log.info("{} created successfully: id={}, title={}, remindAt={}",
                 kindLabel, reminder.id(), title, remindAt);
@@ -564,7 +600,7 @@ public class AutomationRuntime implements InitializingBean {
         if (normalizedExpression == null) {
             return RecurringTaskResult.failure("scheduleExpression is required");
         }
-        if (resolveRecipientId() == null) {
+        if (resolveRecipientIdForOwner(currentUserId()) == null) {
             return RecurringTaskResult.failure("reminder recipient is not bound yet");
         }
 
@@ -593,7 +629,8 @@ public class AutomationRuntime implements InitializingBean {
                 instruction,
                 originalRequest,
                 expectedToolCategories,
-                maxRetries);
+                maxRetries)
+                .withOwnerId(currentUserId());
         store.saveRecurringTask(task);
         scheduleRecurringInstance(task);
         return RecurringTaskResult.success(task,
@@ -627,23 +664,15 @@ public class AutomationRuntime implements InitializingBean {
     }
 
     void triggerReminder(String reminderId) {
-        Optional<AutomationStore.Reminder> existing = store.findReminder(reminderId);
-        if (existing.isEmpty()) {
+        Optional<AutomationStore.Reminder> claimed = store.transitionReminderStatus(
+                reminderId, AutomationStore.ReminderStatus.PENDING,
+                AutomationStore.ReminderStatus.TRIGGERING, clock.instant());
+        if (claimed.isEmpty()) {
             return;
         }
-        AutomationStore.Reminder reminder = existing.get();
-        if (reminder.status() != AutomationStore.ReminderStatus.PENDING) {
-            return;
-        }
+        AutomationStore.Reminder triggering = claimed.get();
 
-        AutomationStore.Reminder triggering = copyReminder(
-                reminder,
-                AutomationStore.ReminderStatus.TRIGGERING,
-                null,
-                reminder.sendAttempts());
-        store.saveReminder(triggering);
-
-        String recipientId = resolveRecipientId();
+        String recipientId = resolveRecipientIdForOwner(triggering.ownerId());
         if (recipientId == null) {
             store.saveReminder(copyReminder(
                     triggering,
@@ -828,12 +857,12 @@ public class AutomationRuntime implements InitializingBean {
         if (triggeredByUserId == null || triggeredByUserId.isBlank()) {
             return;
         }
-        String recipientId = resolveRecipientId();
-        if (recipientId == null || !recipientId.equals(triggeredByUserId)) {
-            return;
-        }
         Instant now = clock.instant();
         for (AutomationStore.Reminder reminder : store.listReminders(AutomationStore.ReminderStatus.PENDING)) {
+            String recipientId = resolveRecipientIdForOwner(reminder.ownerId());
+            if (!triggeredByUserId.equals(recipientId)) {
+                continue;
+            }
             if (!reminder.remindAt().isAfter(now)) {
                 log.info("retrying overdue pending reminder: id={}, title={}", reminder.id(), reminder.title());
                 triggerReminder(reminder.id());
@@ -845,7 +874,7 @@ public class AutomationRuntime implements InitializingBean {
         Instant now = clock.instant();
         for (AutomationStore.Reminder reminder : store.listReminders(AutomationStore.ReminderStatus.PENDING)) {
             if (reminder.remindAt().isAfter(now)) {
-                scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+                scheduleReminder(reminder);
             } else if (properties.isSendMissedRemindersOnStartup()) {
                 triggerReminder(reminder.id());
             } else {
@@ -871,23 +900,24 @@ public class AutomationRuntime implements InitializingBean {
     }
 
     private Optional<AutomationStore.Reminder> findRecentDuplicate(String title, Instant remindAt, String message, Instant now) {
+        String ownerId = currentUserId();
         return store.listReminders(AutomationStore.ReminderStatus.PENDING).stream()
                 .filter(reminder -> reminder.title().equals(title))
                 .filter(reminder -> reminder.remindAt().equals(remindAt))
                 .filter(reminder -> reminder.message().equals(message))
-                .filter(reminder -> reminder.createdAt().plusSeconds(30).isAfter(now))
+                .filter(reminder -> java.util.Objects.equals(reminder.ownerId(), ownerId))
+                .filter(reminder -> reminder.createdAt().plusSeconds(60).isAfter(now))
                 .findFirst();
     }
 
-    private String resolveRecipientId() {
-        String configured = properties.getDefaultRecipientId();
-        if (configured != null && !configured.isBlank()) {
-            return configured.trim();
+    private String resolveRecipientIdForOwner(String ownerId) {
+        if (ownerId != null && !ownerId.isBlank()) {
+            return ownerId;
         }
-        return store.getRecipientBinding()
-                .map(AutomationStore.RecipientBinding::recipientId)
-                .filter(recipientId -> !recipientId.isBlank())
-                .orElse(null);
+        // Legacy ownerless reminders are safe only with an explicit static recipient.
+        // A mutable "last bound user" could leak an old reminder to a different user.
+        String configured = properties.getDefaultRecipientId();
+        return configured != null && !configured.isBlank() ? configured.trim() : null;
     }
 
     private AutomationStore.Reminder copyReminder(AutomationStore.Reminder reminder,
@@ -911,7 +941,8 @@ public class AutomationRuntime implements InitializingBean {
                 reminder.instruction(),
                 reminder.originalRequest(),
                 reminder.expectedToolCategories(),
-                effectiveMaxRetries(reminder));
+                effectiveMaxRetries(reminder),
+                reminder.ownerId());
     }
 
     private Instant parseInstant(String value) {
@@ -943,15 +974,15 @@ public class AutomationRuntime implements InitializingBean {
     }
 
     private static String newReminderId() {
-        return "R-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        return "R-" + UUID.randomUUID().toString().substring(0, 12).toUpperCase(Locale.ROOT);
     }
 
     private static String newScheduleId() {
-        return "S-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        return "S-" + UUID.randomUUID().toString().substring(0, 12).toUpperCase(Locale.ROOT);
     }
 
     private static String newRecurringTaskId() {
-        return "RR-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        return "RR-" + UUID.randomUUID().toString().substring(0, 12).toUpperCase(Locale.ROOT);
     }
 
     private Instant computeNextRunAt(AutomationStore.RecurringScheduleType scheduleType,
@@ -1021,9 +1052,10 @@ public class AutomationRuntime implements InitializingBean {
                 task.instruction(),
                 task.originalRequest(),
                 task.expectedToolCategories(),
-                effectiveMaxRetries(task));
+                effectiveMaxRetries(task))
+                .withOwnerId(task.ownerId());
         store.saveReminder(reminder);
-        scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+        scheduleReminder(reminder);
     }
 
     private void advanceRecurringTaskIfNeeded(AutomationStore.Reminder reminder) {
@@ -1074,7 +1106,12 @@ public class AutomationRuntime implements InitializingBean {
                 task.instruction(),
                 task.originalRequest(),
                 task.expectedToolCategories(),
-                effectiveMaxRetries(task));
+                effectiveMaxRetries(task),
+                task.ownerId());
+    }
+
+    private void scheduleReminder(AutomationStore.Reminder reminder) {
+        scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
     }
 
     private void pauseRecurringTaskIfNeeded(AutomationStore.Reminder reminder, String failureMessage) {
@@ -1214,9 +1251,11 @@ public class AutomationRuntime implements InitializingBean {
         }
     }
 
-    public static class SpringReminderScheduler implements ReminderScheduler {
+    public static class SpringReminderScheduler implements ReminderScheduler, org.springframework.beans.factory.DisposableBean {
         private final TaskScheduler taskScheduler;
         private final Map<String, ScheduledFuture<?>> futures = new ConcurrentHashMap<>();
+        private final java.util.concurrent.ExecutorService executionExecutor =
+                java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
 
         public SpringReminderScheduler(TaskScheduler taskScheduler) {
             this.taskScheduler = taskScheduler;
@@ -1225,7 +1264,14 @@ public class AutomationRuntime implements InitializingBean {
         @Override
         public void schedule(AutomationStore.Reminder reminder, Runnable task) {
             cancel(reminder.id());
-            ScheduledFuture<?> future = taskScheduler.schedule(task, reminder.remindAt());
+            Runnable selfCleaning = () -> {
+                try {
+                    executionExecutor.submit(task);
+                } finally {
+                    futures.remove(reminder.id());
+                }
+            };
+            ScheduledFuture<?> future = taskScheduler.schedule(selfCleaning, reminder.remindAt());
             if (future != null) {
                 futures.put(reminder.id(), future);
             }
@@ -1235,6 +1281,11 @@ public class AutomationRuntime implements InitializingBean {
         public boolean cancel(String reminderId) {
             ScheduledFuture<?> future = futures.remove(reminderId);
             return future != null && future.cancel(false);
+        }
+
+        @Override
+        public void destroy() {
+            executionExecutor.shutdownNow();
         }
     }
 }

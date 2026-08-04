@@ -10,6 +10,14 @@ import com.github.wechat.ilink.sdk.core.context.ResumeContext;
 import com.github.wechat.ilink.sdk.core.listener.OnLoginListener;
 import com.github.wechat.ilink.sdk.core.login.LoginContext;
 import com.youkeda.project.wechatproject.bot.handler.MessageHandler;
+import com.youkeda.project.wechatproject.bot.context.CharacterContextTokenEstimator;
+import com.youkeda.project.wechatproject.bot.context.ContextEngineeringProperties;
+import com.youkeda.project.wechatproject.bot.context.ContextEngineeringService;
+import com.youkeda.project.wechatproject.bot.context.ContextRelevanceClassifier;
+import com.youkeda.project.wechatproject.bot.context.ContextTokenEstimator;
+import com.youkeda.project.wechatproject.bot.context.DefaultContextEngineeringService;
+import com.youkeda.project.wechatproject.bot.context.LlmContextRelevanceClassifier;
+import com.youkeda.project.wechatproject.bot.context.RuleBasedContextRelevanceClassifier;
 import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
 import com.youkeda.project.wechatproject.bot.tool.chat.SkillTools;
 import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
@@ -24,26 +32,29 @@ import com.youkeda.project.wechatproject.bot.service.BotService.IlinkProperties;
 import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
 
 import com.youkeda.project.wechatproject.bot.service.DocumentService;
-import com.youkeda.project.wechatproject.bot.agent.AgentBus;
 import com.youkeda.project.wechatproject.bot.agent.AgentRegistry;
 import com.youkeda.project.wechatproject.bot.agent.AgentUnit;
 import com.youkeda.project.wechatproject.bot.agent.chat.ChatAgent;
 import com.youkeda.project.wechatproject.bot.agent.imagegen.ImageGenAgent;
 import com.youkeda.project.wechatproject.bot.agent.speech.SpeechAgent;
+import com.youkeda.project.wechatproject.bot.model.ModelReply;
 import com.youkeda.project.wechatproject.bot.agent.browser.BrowserAgent;
+import com.youkeda.project.wechatproject.bot.tool.browser.BrowserTools;
 import com.youkeda.project.wechatproject.bot.agent.travel.TravelAgent;
+import com.youkeda.project.wechatproject.bot.memory.AgentMemory;
 import com.youkeda.project.wechatproject.bot.memory.ConversationMemory;
+import com.youkeda.project.wechatproject.bot.memory.FileBasedAgentMemory;
 import com.youkeda.project.wechatproject.bot.memory.OpenClawConversationMemory;
 import com.youkeda.project.wechatproject.bot.memory.RagStore;
 import com.youkeda.project.wechatproject.bot.memory.SqliteRagStore;
 import com.youkeda.project.wechatproject.bot.memory.VectorMemoryIndex;
 import com.youkeda.project.wechatproject.bot.service.AiService.EmbeddingClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.OpenAiCompatibleEmbeddingClient;
-import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorAgent;
-import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorAgentImpl;
-import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorProperties;
+import com.youkeda.project.wechatproject.bot.orchestrator.DagPlanningAgentImpl;
+import com.youkeda.project.wechatproject.bot.orchestrator.DagOrchestrationProperties;
 import com.youkeda.project.wechatproject.bot.router.MessageRouter;
 import com.youkeda.project.wechatproject.bot.router.SimpleModeRouter;
+import com.youkeda.project.wechatproject.bot.router.TaskComplexityRouter;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.AudioConverter;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.FunAsrSttClient;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.Qwen3TtsFlashClient;
@@ -53,6 +64,10 @@ import com.youkeda.project.wechatproject.bot.service.VoiceService.TextToSpeechCl
 import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceCatalog;
 import com.youkeda.project.wechatproject.bot.tool.chat.ScheduledTaskExecutionResult;
 import com.youkeda.project.wechatproject.bot.tool.chat.ScheduledTaskExecutor;
+import com.youkeda.project.wechatproject.bot.workflow.DagOrchestrationService;
+import com.youkeda.project.wechatproject.bot.workflow.DagPlanningAgent;
+import com.youkeda.project.wechatproject.bot.workflow.DagTaskStore;
+import com.youkeda.project.wechatproject.bot.workflow.SqliteDagTaskStore;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolRuntime;
 import org.slf4j.Logger;
@@ -73,6 +88,7 @@ import org.springframework.web.client.DefaultResponseErrorHandler;
 import org.springframework.web.client.ResponseErrorHandler;
 import org.springframework.web.client.RestClient;
 
+import java.io.IOException;
 import java.net.http.HttpClient;
 import java.util.List;
 
@@ -80,7 +96,8 @@ import java.util.List;
 @EnableConfigurationProperties({
         IlinkProperties.class,
         AgentProperties.class,
-        OrchestratorProperties.class,
+        DagOrchestrationProperties.class,
+        ContextEngineeringProperties.class,
         SpeechProperties.class
 })
 public class BotAutoConfiguration {
@@ -117,6 +134,7 @@ public class BotAutoConfiguration {
     }
 
     private static final String RESUME_CONTEXT_PATH = "data/ilink-resume/resume-context.json";
+    private static final String RESUME_KEY_PATH = "data/ilink-resume/resume-context.key";
     private static final ObjectMapper RESUME_MAPPER = new ObjectMapper();
 
     @Bean
@@ -183,6 +201,11 @@ public class BotAutoConfiguration {
         try {
             String content = java.nio.file.Files.readString(path);
             JsonNode root = RESUME_MAPPER.readTree(content);
+            if (root.hasNonNull("ciphertext")) {
+                root = RESUME_MAPPER.readTree(decryptResumePayload(root.get("ciphertext").asText()));
+            } else {
+                log.warn("loading legacy plaintext resume context; it will be encrypted on the next save");
+            }
 
             JsonNode lc = root.get("loginContext");
             if (lc == null) {
@@ -288,14 +311,89 @@ public class BotAutoConfiguration {
 
             java.nio.file.Path dir = java.nio.file.Path.of(RESUME_CONTEXT_PATH).getParent();
             java.nio.file.Files.createDirectories(dir);
-            java.nio.file.Files.writeString(
-                    java.nio.file.Path.of(RESUME_CONTEXT_PATH),
+            String encrypted = encryptResumePayload(
                     RESUME_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(root));
+            var envelope = RESUME_MAPPER.createObjectNode();
+            envelope.put("format", "aes-gcm-v1");
+            envelope.put("ciphertext", encrypted);
+            java.nio.file.Path target = java.nio.file.Path.of(RESUME_CONTEXT_PATH);
+            java.nio.file.Path temp = target.resolveSibling(target.getFileName() + ".tmp");
+            java.nio.file.Files.writeString(temp,
+                    RESUME_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(envelope));
+            try {
+                java.nio.file.Files.move(temp, target, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                java.nio.file.Files.move(temp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
             log.info("resume context saved to {}", RESUME_CONTEXT_PATH);
 
         } catch (Exception e) {
             log.error("failed to save resume context: {}", e.getMessage(), e);
         }
+    }
+
+    private static String encryptResumePayload(String plaintext) throws Exception {
+        byte[] nonce = new byte[12];
+        new java.security.SecureRandom().nextBytes(nonce);
+        javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(javax.crypto.Cipher.ENCRYPT_MODE,
+                new javax.crypto.spec.SecretKeySpec(loadResumeKey(), "AES"),
+                new javax.crypto.spec.GCMParameterSpec(128, nonce));
+        byte[] ciphertext = cipher.doFinal(plaintext.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        byte[] envelope = java.nio.ByteBuffer.allocate(nonce.length + ciphertext.length)
+                .put(nonce).put(ciphertext).array();
+        return java.util.Base64.getEncoder().encodeToString(envelope);
+    }
+
+    private static String decryptResumePayload(String encoded) throws Exception {
+        byte[] envelope = java.util.Base64.getDecoder().decode(encoded);
+        if (envelope.length < 29) {
+            throw new java.security.GeneralSecurityException("invalid encrypted resume context");
+        }
+        byte[] nonce = java.util.Arrays.copyOfRange(envelope, 0, 12);
+        byte[] ciphertext = java.util.Arrays.copyOfRange(envelope, 12, envelope.length);
+        javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(javax.crypto.Cipher.DECRYPT_MODE,
+                new javax.crypto.spec.SecretKeySpec(loadResumeKey(), "AES"),
+                new javax.crypto.spec.GCMParameterSpec(128, nonce));
+        return new String(cipher.doFinal(ciphertext), java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static byte[] loadResumeKey() throws Exception {
+        String configured = System.getenv("WECHAT_RESUME_CONTEXT_KEY");
+        if (configured != null && !configured.isBlank()) {
+            byte[] key = java.util.Base64.getDecoder().decode(configured.trim());
+            if (key.length != 32) {
+                throw new IllegalArgumentException("WECHAT_RESUME_CONTEXT_KEY must be a base64-encoded 32-byte key");
+            }
+            return key;
+        }
+
+        java.nio.file.Path keyPath = java.nio.file.Path.of(RESUME_KEY_PATH);
+        if (java.nio.file.Files.exists(keyPath)) {
+            byte[] key = java.util.Base64.getDecoder().decode(java.nio.file.Files.readString(keyPath).trim());
+            if (key.length != 32) {
+                throw new java.security.GeneralSecurityException("invalid resume context key file");
+            }
+            return key;
+        }
+        java.nio.file.Files.createDirectories(keyPath.getParent());
+        byte[] key = new byte[32];
+        new java.security.SecureRandom().nextBytes(key);
+        try {
+            java.nio.file.Files.writeString(keyPath, java.util.Base64.getEncoder().encodeToString(key),
+                    java.nio.file.StandardOpenOption.CREATE_NEW);
+        } catch (java.nio.file.FileAlreadyExistsException race) {
+            return loadResumeKey();
+        }
+        try {
+            java.nio.file.Files.setPosixFilePermissions(keyPath,
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"));
+        } catch (UnsupportedOperationException ignored) {
+            // Windows ACLs inherit from the private application data directory.
+        }
+        return key;
     }
 
     @Bean
@@ -304,6 +402,40 @@ public class BotAutoConfiguration {
     public AiModelClient aiModelClient(AgentProperties props) {
         log.info("creating OpenAiCompatibleClient for model={}, url={}", props.getModel(), props.getApiUrl());
         return new OpenAiCompatibleClient(props);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ContextTokenEstimator contextTokenEstimator() {
+        return new CharacterContextTokenEstimator();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ContextRelevanceClassifier contextRelevanceClassifier(
+            AgentProperties props, ContextEngineeringProperties contextProperties) {
+        ContextRelevanceClassifier rules = new RuleBasedContextRelevanceClassifier();
+        if (!props.isEnabled() || !contextProperties.isLlmRelevanceEnabled()) {
+            return rules;
+        }
+        String intentModel = props.getIntentModel() != null && !props.getIntentModel().isBlank()
+                ? props.getIntentModel() : props.getModel();
+        return new LlmContextRelevanceClassifier(
+                OpenAiCompatibleClient.forIntent(props), rules, intentModel);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ContextEngineeringService contextEngineeringService(
+            ContextRelevanceClassifier classifier,
+            ContextTokenEstimator tokenEstimator,
+            ContextEngineeringProperties contextProperties,
+            AgentProperties agentProperties) {
+        return new DefaultContextEngineeringService(
+                classifier,
+                tokenEstimator,
+                contextProperties,
+                contextProperties.toBudget(agentProperties.getContextWindowTokens()));
     }
 
     @Bean
@@ -392,19 +524,40 @@ public class BotAutoConfiguration {
     }
 
     @Bean
+    @ConditionalOnMissingBean(name = "chatAgentMemory")
+    public AgentMemory chatAgentMemory(AgentProperties props) {
+        return new FileBasedAgentMemory("CHAT", props.getMemoryBasePath(), props.getMemoryTtlMinutes() * 60L);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "browserAgentMemory")
+    public AgentMemory browserAgentMemory(AgentProperties props) {
+        return new FileBasedAgentMemory("BROWSER", props.getMemoryBasePath(), props.getMemoryTtlMinutes() * 60L);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(name = "travelAgentMemory")
+    public AgentMemory travelAgentMemory(AgentProperties props) {
+        return new FileBasedAgentMemory("TRAVEL", props.getMemoryBasePath(), props.getMemoryTtlMinutes() * 60L);
+    }
+
+    @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
     public ChatAgent chatAgent(AiModelClient aiModelClient,
                                AgentProperties props,
                                ObjectProvider<ToolChatClientFactory> toolChatClientFactoryProvider,
                                ObjectProvider<ToolRuntime> toolRuntimeProvider,
-                               ObjectProvider<SkillTools> skillToolsProvider) {
+                               ObjectProvider<SkillTools> skillToolsProvider,
+                               @org.springframework.beans.factory.annotation.Qualifier("chatAgentMemory") AgentMemory chatAgentMemory,
+                               ContextEngineeringService contextEngineeringService) {
         log.info("creating ChatAgent");
         ToolRuntime toolRuntime = toolRuntimeProvider.getIfAvailable();
         String categories = toolRuntime != null ? toolRuntime.getCategorySummary() : "";
         SkillTools skillTools = skillToolsProvider.getIfAvailable();
         String skillsSummary = skillTools != null ? skillTools.getSkillsSummary("CHAT") : "";
-        return new ChatAgent(aiModelClient, props, toolChatClientFactoryProvider.getIfAvailable(), categories, skillsSummary);
+        return new ChatAgent(aiModelClient, props, toolChatClientFactoryProvider.getIfAvailable(),
+                categories, skillsSummary, chatAgentMemory, contextEngineeringService);
     }
 
     @Bean
@@ -413,7 +566,10 @@ public class BotAutoConfiguration {
     public TravelAgent travelAgent(
             @org.springframework.beans.factory.annotation.Qualifier("travelToolChatClientFactory")
             ObjectProvider<ToolChatClientFactory> travelToolChatClientFactoryProvider,
-            ObjectProvider<SkillTools> skillToolsProvider) {
+            ObjectProvider<SkillTools> skillToolsProvider,
+            @org.springframework.beans.factory.annotation.Qualifier("travelAgentMemory") AgentMemory travelAgentMemory,
+            AgentProperties props,
+            ContextEngineeringService contextEngineeringService) {
         ToolChatClientFactory factory = travelToolChatClientFactoryProvider.getIfAvailable();
         if (factory == null) {
             log.info("TravelAgent not created: no travel tools available");
@@ -422,7 +578,8 @@ public class BotAutoConfiguration {
         }
         SkillTools skillTools = skillToolsProvider.getIfAvailable();
         String skillsSummary = skillTools != null ? skillTools.getSkillsSummary("TRAVEL") : "";
-        return new TravelAgent(factory, skillsSummary);
+        return new TravelAgent(factory, skillsSummary, travelAgentMemory,
+                Math.max(30, props.getToolCallTimeoutSeconds()), contextEngineeringService);
     }
 
     @Bean
@@ -431,16 +588,20 @@ public class BotAutoConfiguration {
     public BrowserAgent browserAgent(
             @org.springframework.beans.factory.annotation.Qualifier("browserToolChatClientFactory")
             ObjectProvider<ToolChatClientFactory> browserToolChatClientFactoryProvider,
-            ObjectProvider<SkillTools> skillToolsProvider) {
+            ObjectProvider<BrowserTools> browserToolsProvider,
+            ObjectProvider<SkillTools> skillToolsProvider,
+            @org.springframework.beans.factory.annotation.Qualifier("browserAgentMemory") AgentMemory browserAgentMemory,
+            ContextEngineeringService contextEngineeringService) {
         ToolChatClientFactory factory = browserToolChatClientFactoryProvider.getIfAvailable();
         if (factory == null) {
             log.info("BrowserAgent not created: no browser tools available");
         } else {
-            log.info("creating BrowserAgent");
+            log.info("creating BrowserAgent (with self-verification + agent memory)");
         }
         SkillTools skillTools = skillToolsProvider.getIfAvailable();
         String skillsSummary = skillTools != null ? skillTools.getSkillsSummary("BROWSER") : "";
-        return new BrowserAgent(factory, skillsSummary);
+        return new BrowserAgent(factory, browserToolsProvider.getIfAvailable(), skillsSummary,
+                browserAgentMemory, contextEngineeringService);
     }
 
     @Bean
@@ -495,14 +656,6 @@ public class BotAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public AgentBus agentBus(AgentRegistry agentRegistry) {
-        log.info("creating AgentBus");
-        return new AgentBus(agentRegistry);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
     public DocumentService documentService(ObjectProvider<SpeechToTextClient> sttClientProvider) {
         log.info("creating DocumentService");
         return new DocumentService(sttClientProvider.getIfAvailable());
@@ -511,11 +664,36 @@ public class BotAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public OrchestratorAgent orchestratorAgent(AgentProperties props, AgentRegistry agentRegistry) {
-        log.info("creating OrchestratorAgentImpl for model={}, url={}",
+    public DagPlanningAgent dagPlanningAgent(AgentProperties props, AgentRegistry agentRegistry,
+                                             ObjectProvider<SkillTools> skillToolsProvider,
+                                             ContextEngineeringService contextEngineeringService) {
+        log.info("creating DagPlanningAgentImpl for model={}, url={}",
                 props.getIntentModel() != null ? props.getIntentModel() : props.getModel(),
                 props.getIntentApiUrl() != null ? props.getIntentApiUrl() : props.getApiUrl());
-        return new OrchestratorAgentImpl(props, agentRegistry);
+        return new DagPlanningAgentImpl(
+                props, agentRegistry, skillToolsProvider.getIfAvailable(), contextEngineeringService);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.orchestrator", name = "dag-enabled",
+            havingValue = "true", matchIfMissing = true)
+    public DagTaskStore dagTaskStore(DagOrchestrationProperties properties) {
+        log.info("creating SQLite DAG task store at {}", properties.getDagStorePath());
+        return new SqliteDagTaskStore(properties.getDagStorePath());
+    }
+
+    @Bean(destroyMethod = "shutdown")
+    @ConditionalOnMissingBean
+    @ConditionalOnBean({DagPlanningAgent.class, AgentRegistry.class, DagTaskStore.class})
+    @ConditionalOnProperty(prefix = "agent.orchestrator", name = "dag-enabled",
+            havingValue = "true", matchIfMissing = true)
+    public DagOrchestrationService dagOrchestrationService(DagPlanningAgent planningAgent,
+                                                           AgentRegistry agentRegistry,
+                                                           DagTaskStore taskStore,
+                                                           DagOrchestrationProperties properties) {
+        log.info("creating DAG orchestration service");
+        return new DagOrchestrationService(planningAgent, agentRegistry, taskStore, properties);
     }
 
     @Bean
@@ -529,17 +707,31 @@ public class BotAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    @ConditionalOnBean(AgentRegistry.class)
+    @ConditionalOnProperty(prefix = "agent.orchestrator", name = "complexity-routing-enabled",
+            havingValue = "true", matchIfMissing = true)
+    public TaskComplexityRouter taskComplexityRouter(AgentProperties props, AgentRegistry agentRegistry) {
+        String model = props.getComplexityModel() != null && !props.getComplexityModel().isBlank()
+                ? props.getComplexityModel()
+                : (props.getIntentModel() != null && !props.getIntentModel().isBlank()
+                ? props.getIntentModel() : props.getModel());
+        log.info("creating TaskComplexityRouter model={} timeoutMs={}",
+                model, props.getComplexityReadTimeoutMs());
+        return new TaskComplexityRouter(
+                OpenAiCompatibleClient.forComplexity(props), agentRegistry, model);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public MessageRouter messageRouter(OrchestratorAgent orchestratorAgent,
-                                       AgentRegistry agentRegistry,
-                                       ConversationMemory conversationMemory,
-                                       VoiceCatalog voiceCatalog,
+    public MessageRouter messageRouter(ConversationMemory conversationMemory,
                                        DocumentService documentService,
-                                       OrchestratorProperties orchestratorProperties,
-                                       SimpleModeRouter simpleModeRouter) {
-        log.info("creating MessageRouter (orchestration mode)");
-        return new MessageRouter(orchestratorAgent, agentRegistry, conversationMemory, voiceCatalog,
-                documentService, orchestratorProperties, simpleModeRouter);
+                                       SimpleModeRouter simpleModeRouter,
+                                       ObjectProvider<DagOrchestrationService> dagServiceProvider,
+                                       ObjectProvider<TaskComplexityRouter> complexityRouterProvider) {
+        log.info("creating MessageRouter (simple + DAG mode)");
+        return new MessageRouter(conversationMemory, documentService, simpleModeRouter,
+                dagServiceProvider.getIfAvailable(), complexityRouterProvider.getIfAvailable());
     }
 
     @Bean
@@ -549,101 +741,98 @@ public class BotAutoConfiguration {
                                                         ObjectProvider<ILinkClient> ilinkClientProvider,
                                                         ObjectProvider<AudioConverter> audioConverterProvider) {
         return request -> {
-            var reply = messageRouter.routeScheduledTask(request);
+            var replies = messageRouter.routeScheduledTask(request);
             ILinkClient client = ilinkClientProvider.getIfAvailable();
 
-            return switch (reply.getType()) {
-                case TEXT -> {
+            if (replies.isEmpty()) {
+                return ScheduledTaskExecutionResult.success("计划任务已执行完成。");
+            }
+
+            // Dispatch each reply to the user
+            for (var reply : replies) {
+                dispatchScheduledReply(client, audioConverterProvider, request.recipientId(), reply);
+            }
+
+            // Return the last TEXT reply's content as the result summary
+            for (int i = replies.size() - 1; i >= 0; i--) {
+                var reply = replies.get(i);
+                if (reply.getType() == ModelReply.Type.TEXT || reply.getType() == ModelReply.Type.MIXED) {
                     String text = reply.getTextContent();
-                    yield text != null && !text.isBlank()
-                            ? ScheduledTaskExecutionResult.success(text)
-                            : ScheduledTaskExecutionResult.success("计划任务已执行完成。");
+                    if (text != null && !text.isBlank()) {
+                        return ScheduledTaskExecutionResult.success(text);
+                    }
                 }
-                case VOICE -> {
-                    var audio = reply.getAudioPayload();
-                    if (audio == null || audio.bytes() == null || audio.bytes().length == 0) {
-                        yield ScheduledTaskExecutionResult.failure("语音生成结果为空");
-                    }
-                    if (client == null) {
-                        yield ScheduledTaskExecutionResult.failure("iLink client 不可用");
-                    }
-                    AudioConverter converter = audioConverterProvider.getIfAvailable();
-                    if (converter == null) {
-                        yield ScheduledTaskExecutionResult.failure("语音转换器不可用");
-                    }
-                    byte[] mp3Bytes = converter.wavToMp3(audio.bytes());
-                    log.info("scheduled task dispatching voice: {} bytes (converted to mp3: {} bytes)",
-                            audio.bytes().length, mp3Bytes.length);
-                    client.sendFile(request.recipientId(), mp3Bytes, "tts.mp3", null);
-                    yield ScheduledTaskExecutionResult.success("[语音已发送]");
-                }
-                case IMAGE -> {
-                    var images = reply.getImages();
-                    if (images == null || images.isEmpty()) {
-                        yield ScheduledTaskExecutionResult.failure("图片生成结果为空");
-                    }
-                    if (client == null) {
-                        yield ScheduledTaskExecutionResult.failure("iLink client 不可用");
-                    }
-                    for (var img : images) {
-                        log.info("scheduled task dispatching image: name={}, size={}",
-                                img.fileName(), img.bytes().length);
-                        try {
-                            client.sendImage(request.recipientId(), img.bytes(), img.fileName(), null);
-                        } catch (Exception e) {
-                            log.warn("sendImage failed, falling back to sendFile: {}", e.getMessage());
-                            client.sendFile(request.recipientId(), img.bytes(), img.fileName(), null);
-                        }
-                    }
-                    yield ScheduledTaskExecutionResult.success("[图片已发送]");
-                }
-                case MIXED -> {
-                    String text = reply.getTextContent();
-                    if (text != null && !text.isBlank() && client != null) {
-                        client.sendText(request.recipientId(), text);
-                    }
-                    // 发送图片
-                    var images = reply.getImages();
-                    if (images != null && !images.isEmpty() && client != null) {
-                        for (var img : images) {
-                            try {
-                                client.sendImage(request.recipientId(), img.bytes(), img.fileName(), null);
-                            } catch (Exception e) {
-                                client.sendFile(request.recipientId(), img.bytes(), img.fileName(), null);
-                            }
-                        }
-                    }
-                    // 发送文件
-                    var filePayload = reply.getFilePayload();
-                    if (filePayload != null && client != null) {
-                        log.info("scheduled task dispatching file: name={}, size={}",
-                                filePayload.fileName(), filePayload.bytes().length);
-                        client.sendFile(request.recipientId(), filePayload.bytes(), filePayload.fileName(), null);
-                    }
-                    // 发送语音
-                    var audio = reply.getAudioPayload();
-                    if (audio != null && audio.bytes() != null && audio.bytes().length > 0 && client != null) {
-                        AudioConverter converter = audioConverterProvider.getIfAvailable();
-                        if (converter != null) {
-                            byte[] mp3Bytes = converter.wavToMp3(audio.bytes());
-                            client.sendFile(request.recipientId(), mp3Bytes, "tts.mp3", null);
-                        }
-                    }
-                    yield text != null && !text.isBlank()
-                            ? ScheduledTaskExecutionResult.success(text)
-                            : ScheduledTaskExecutionResult.success("计划任务已执行完成。");
-                }
-                case FILE -> {
-                    var filePayload = reply.getFilePayload();
-                    if (filePayload != null && client != null) {
-                        log.info("scheduled task dispatching file: name={}, size={}",
-                                filePayload.fileName(), filePayload.bytes().length);
-                        client.sendFile(request.recipientId(), filePayload.bytes(), filePayload.fileName(), null);
-                    }
-                    yield ScheduledTaskExecutionResult.success("文件已发送。");
-                }
-            };
+            }
+            return ScheduledTaskExecutionResult.success("计划任务已执行完成。");
         };
+    }
+
+    private static void dispatchScheduledReply(ILinkClient client,
+                                                ObjectProvider<AudioConverter> audioConverterProvider,
+                                                String recipientId, ModelReply reply) throws IOException {
+        switch (reply.getType()) {
+            case TEXT -> {
+                String text = reply.getTextContent();
+                if (text != null && !text.isBlank() && client != null) {
+                    client.sendText(recipientId, text);
+                }
+            }
+            case IMAGE -> {
+                if (client == null) return;
+                for (var img : reply.getImages()) {
+                    log.info("scheduled task dispatching image: name={}, size={}",
+                            img.fileName(), img.bytes().length);
+                    try {
+                        client.sendImage(recipientId, img.bytes(), img.fileName(), null);
+                    } catch (Exception e) {
+                        log.warn("sendImage failed, falling back to sendFile: {}", e.getMessage());
+                        client.sendFile(recipientId, img.bytes(), img.fileName(), null);
+                    }
+                }
+            }
+            case MIXED -> {
+                if (client == null) return;
+                String text = reply.getTextContent();
+                if (text != null && !text.isBlank()) {
+                    client.sendText(recipientId, text);
+                }
+                for (var img : reply.getImages()) {
+                    try {
+                        client.sendImage(recipientId, img.bytes(), img.fileName(), null);
+                    } catch (Exception e) {
+                        client.sendFile(recipientId, img.bytes(), img.fileName(), null);
+                    }
+                }
+                var filePayload = reply.getFilePayload();
+                if (filePayload != null) {
+                    client.sendFile(recipientId, filePayload.bytes(), filePayload.fileName(), null);
+                }
+                var audio = reply.getAudioPayload();
+                if (audio != null && audio.bytes() != null && audio.bytes().length > 0) {
+                    AudioConverter converter = audioConverterProvider.getIfAvailable();
+                    if (converter != null) {
+                        byte[] mp3Bytes = converter.wavToMp3(audio.bytes());
+                        client.sendFile(recipientId, mp3Bytes, "tts.mp3", null);
+                    }
+                }
+            }
+            case VOICE -> {
+                var audio = reply.getAudioPayload();
+                if (audio == null || audio.bytes() == null || audio.bytes().length == 0) return;
+                if (client == null) return;
+                AudioConverter converter = audioConverterProvider.getIfAvailable();
+                if (converter != null) {
+                    byte[] mp3Bytes = converter.wavToMp3(audio.bytes());
+                    client.sendFile(recipientId, mp3Bytes, "tts.mp3", null);
+                }
+            }
+            case FILE -> {
+                var filePayload = reply.getFilePayload();
+                if (filePayload != null && client != null) {
+                    client.sendFile(recipientId, filePayload.bytes(), filePayload.fileName(), null);
+                }
+            }
+        }
     }
 
     @Bean
@@ -657,11 +846,13 @@ public class BotAutoConfiguration {
                                          ObjectProvider<AudioConverter> audioConverterProvider,
                                          DocumentService documentService,
                                          ObjectProvider<AutomationRuntime> automationRuntimeProvider,
-                                         ObjectProvider<RagStore> ragStoreProvider) {
+                                         ObjectProvider<RagStore> ragStoreProvider,
+                                         ConversationMemory conversationMemory) {
         log.info("creating MessageHandler");
         return new MessageHandler(ilinkClient, messageBridge, messageRouter,
                 sttClientProvider.getIfAvailable(), audioConverterProvider.getIfAvailable(), documentService,
                 automationRuntimeProvider.getIfAvailable(),
-                ragStoreProvider.getIfAvailable());
+                ragStoreProvider.getIfAvailable(),
+                conversationMemory);
     }
 }

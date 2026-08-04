@@ -1,11 +1,15 @@
 package com.youkeda.project.wechatproject.bot.router;
 
 import com.youkeda.project.wechatproject.bot.agent.AgentRegistry;
+import com.youkeda.project.wechatproject.bot.agent.AgentExecutionContext;
 import com.youkeda.project.wechatproject.bot.agent.AgentResult;
 import com.youkeda.project.wechatproject.bot.agent.AgentTask;
 import com.youkeda.project.wechatproject.bot.agent.AgentUnit;
 import com.youkeda.project.wechatproject.bot.agent.speech.SpeechAgent;
 import com.youkeda.project.wechatproject.bot.memory.ConversationMemory;
+import com.youkeda.project.wechatproject.bot.context.ContextAudience;
+import com.youkeda.project.wechatproject.bot.context.ContextStage;
+import com.youkeda.project.wechatproject.bot.context.ContextTaskState;
 import com.youkeda.project.wechatproject.bot.model.ModelReply;
 import com.youkeda.project.wechatproject.bot.service.AiService.ChatRequest;
 import com.youkeda.project.wechatproject.bot.service.AiService.GeneratedImage;
@@ -22,31 +26,31 @@ import java.util.Map;
 /**
  * Simple mode router: keyword matching → single agent execution, no orchestrator, no reflection.
  * Falls back to CHAT when no keyword matches.
+ * Keywords are derived dynamically from each agent's {@link AgentCapability#routingKeywords()}.
  */
 public class SimpleModeRouter {
 
     private static final Logger log = LoggerFactory.getLogger(SimpleModeRouter.class);
 
-    private static final Map<String, List<String>> AGENT_KEYWORDS = Map.of(
-            "TRAVEL", List.of(
-                    "导航", "地图", "路线", "天气", "打车", "附近", "怎么去", "在哪", "多远",
-                    "公交", "地铁", "开车", "步行", "骑行", "叫车", "出行", "叫车"),
-            "BROWSER", List.of(
-                    "搜索", "上网", "查一下", "打开网页", "登录", "帮我搜", "百度", "网上",
-                    "浏览器", "打开链接", "查资料", "浏览"),
-            "IMAGE_GEN", List.of(
-                    "生成图片", "画一张", "画个", "生成一张", "P图", "做图", "生成图",
-                    "画图", "绘画", "生成图像", "帮我画"),
-            "SPEECH_GEN", List.of(
-                    "朗读", "语音", "朗诵", "读出来", "念", "播报", "说出来")
-    );
-
     private final AgentRegistry registry;
     private final ConversationMemory memory;
+    private final Map<String, List<String>> agentKeywords;
 
     public SimpleModeRouter(AgentRegistry registry, ConversationMemory memory) {
         this.registry = registry;
         this.memory = memory;
+        this.agentKeywords = buildAgentKeywords(registry);
+    }
+
+    private static Map<String, List<String>> buildAgentKeywords(AgentRegistry registry) {
+        Map<String, List<String>> map = new LinkedHashMap<>();
+        for (var entry : registry.all().entrySet()) {
+            List<String> keywords = entry.getValue().getCapability().routingKeywords();
+            if (!keywords.isEmpty()) {
+                map.put(entry.getKey(), keywords);
+            }
+        }
+        return Map.copyOf(map);
     }
 
     public ModelReply route(String userId, String text, List<String> imageBase64Urls) throws IOException {
@@ -64,17 +68,23 @@ public class SimpleModeRouter {
         }
 
         Map<String, Object> params = new LinkedHashMap<>();
+        params.put("userId", userId);
         if ("CHAT".equals(agentType)) {
             if (!imageBase64Urls.isEmpty()) {
                 params.put("imageUrls", imageBase64Urls);
             }
-            if (!history.isEmpty()) {
-                params.put("history", history);
-            }
         }
 
         String instruction = text != null ? text : "";
-        AgentTask task = new AgentTask(agentType, instruction, params);
+        AgentTask task = new AgentTask(agentType, instruction, params)
+                .withExecutionContext(new AgentExecutionContext(
+                        userId,
+                        ContextStage.EXECUTE,
+                        ContextAudience.DIRECT,
+                        "CHAT".equals(agentType) ? history : List.of(),
+                        ContextTaskState.empty(),
+                        imageBase64Urls,
+                        null));
 
         SkillTools.setCurrentAgent(agentType);
         AgentResult result;
@@ -99,7 +109,7 @@ public class SimpleModeRouter {
             return "CHAT";
         }
         String lower = text.toLowerCase(Locale.ROOT);
-        for (var entry : AGENT_KEYWORDS.entrySet()) {
+        for (var entry : agentKeywords.entrySet()) {
             for (String kw : entry.getValue()) {
                 if (lower.contains(kw.toLowerCase(Locale.ROOT))) {
                     return entry.getKey();
@@ -124,6 +134,14 @@ public class SimpleModeRouter {
     }
 
     private ModelReply buildReply(String agentType, AgentResult result) {
+        return buildAgentReply(agentType, result);
+    }
+
+    /**
+     * Converts a single agent's result into a ModelReply.
+     * Shared with {@link MessageRouter} for reply assembly consistency.
+     */
+    static ModelReply buildAgentReply(String agentType, AgentResult result) {
         if (result.status() == AgentResult.Status.FAILED) {
             String msg = result.output() instanceof String s ? s : "操作失败，请稍后重试。";
             return ModelReply.text(msg);

@@ -11,14 +11,6 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
-import javax.imageio.IIOImage;
-import javax.imageio.ImageIO;
-import javax.imageio.ImageWriteParam;
-import javax.imageio.ImageWriter;
-import javax.imageio.stream.MemoryCacheImageOutputStream;
-import java.awt.Graphics2D;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
@@ -47,10 +39,6 @@ public class LocalFileTools implements ProjectTool {
     private static final Logger log = LoggerFactory.getLogger(LocalFileTools.class);
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
     private static final ThreadLocal<PreparedFile> PREPARED_FILE = new ThreadLocal<>();
-    private static final int MAX_EMBED_IMAGES = 5;
-    private static final long MAX_EMBED_IMAGE_TOTAL_BYTES = 5 * 1024 * 1024L;
-    private static final int MAX_IMAGE_DIMENSION = 1024;
-    private static final float JPEG_QUALITY = 0.75f;
 
     @Autowired(required = false)
     private DocumentService documentService;
@@ -217,81 +205,11 @@ public class LocalFileTools implements ProjectTool {
         List<byte[]> images = result.images();
         if (images != null && !images.isEmpty()) {
             sb.append("\n\n---\n");
-            sb.append("文档中提取到 ").append(images.size()).append(" 张嵌入图片：\n");
-
-            long totalBytes = 0;
-            int embedCount = 0;
-            for (int i = 0; i < images.size(); i++) {
-                byte[] raw = images.get(i);
-                if (raw == null || raw.length == 0) {
-                    continue;
-                }
-                if (embedCount >= MAX_EMBED_IMAGES || totalBytes > MAX_EMBED_IMAGE_TOTAL_BYTES) {
-                    sb.append("\n（还有 ").append(images.size() - embedCount)
-                            .append(" 张图片因数量/大小限制未展开，已到达上限）");
-                    break;
-                }
-                totalBytes += raw.length;
-                try {
-                    byte[] compressed = compressImageForEmbed(raw);
-                    String dataUri = "data:image/jpeg;base64,"
-                            + java.util.Base64.getEncoder().encodeToString(compressed);
-                    sb.append("\n图片 ").append(i + 1).append("：\n").append(dataUri).append("\n");
-                    embedCount++;
-                } catch (Exception e) {
-                    log.warn("failed to compress image {} from '{}'", i + 1, fileName, e);
-                    sb.append("\n图片 ").append(i + 1).append("：（压缩失败，已跳过）");
-                }
-            }
+            sb.append("文档中提取到 ").append(images.size()).append(" 张嵌入图片")
+                    .append("（未内联到文本上下文；需要查看时请发送原始文件）。");
         }
 
         return sb.toString().trim();
-    }
-
-    private static byte[] compressImageForEmbed(byte[] raw) throws IOException {
-        BufferedImage src = ImageIO.read(new java.io.ByteArrayInputStream(raw));
-        if (src == null) {
-            return raw;
-        }
-
-        BufferedImage scaled = resizeIfNeeded(src);
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        var writers = ImageIO.getImageWritersByFormatName("jpeg");
-        if (!writers.hasNext()) {
-            ImageIO.write(scaled, "jpg", out);
-            return out.toByteArray();
-        }
-        ImageWriter writer = writers.next();
-        try {
-            ImageWriteParam param = writer.getDefaultWriteParam();
-            param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
-            param.setCompressionQuality(JPEG_QUALITY);
-            writer.setOutput(new MemoryCacheImageOutputStream(out));
-            writer.write(null, new IIOImage(scaled, null, null), param);
-        } finally {
-            writer.dispose();
-        }
-        return out.toByteArray();
-    }
-
-    private static BufferedImage resizeIfNeeded(BufferedImage src) {
-        int w = src.getWidth();
-        int h = src.getHeight();
-        int max = Math.max(w, h);
-        if (max <= MAX_IMAGE_DIMENSION) {
-            return src;
-        }
-        double ratio = (double) MAX_IMAGE_DIMENSION / max;
-        int newW = Math.max(1, (int) (w * ratio));
-        int newH = Math.max(1, (int) (h * ratio));
-        BufferedImage scaled = new BufferedImage(newW, newH, BufferedImage.TYPE_INT_RGB);
-        Graphics2D g = scaled.createGraphics();
-        try {
-            g.drawImage(src.getScaledInstance(newW, newH, java.awt.Image.SCALE_SMOOTH), 0, 0, null);
-        } finally {
-            g.dispose();
-        }
-        return scaled;
     }
 
     @Tool(name = "send_local_file",
