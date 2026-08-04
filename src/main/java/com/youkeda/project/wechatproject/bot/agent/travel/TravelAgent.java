@@ -19,6 +19,11 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Handles weather, map/navigation, POI search, and ride-hailing through
@@ -27,6 +32,7 @@ import java.util.Map;
 public class TravelAgent implements AgentUnit {
 
     private static final Logger log = LoggerFactory.getLogger(TravelAgent.class);
+    private static final long DEFAULT_TIMEOUT_SECONDS = 120;
     private static final String SYSTEM_PROMPT = """
             你是出行助手。你可以使用高德地图、天气、滴滴打车等工具来帮助用户。
 
@@ -48,15 +54,22 @@ public class TravelAgent implements AgentUnit {
             """;
     private final ChatClient toolChatClient;
     private final String skillsSummary;
+    private final long timeoutSeconds;
 
     public TravelAgent(ToolChatClientFactory travelToolChatClientFactory) {
         this(travelToolChatClientFactory, "");
     }
 
     public TravelAgent(ToolChatClientFactory travelToolChatClientFactory, String skillsSummary) {
+        this(travelToolChatClientFactory, skillsSummary, DEFAULT_TIMEOUT_SECONDS);
+    }
+
+    public TravelAgent(ToolChatClientFactory travelToolChatClientFactory, String skillsSummary,
+                       long timeoutSeconds) {
         this.toolChatClient = travelToolChatClientFactory != null
                 ? travelToolChatClientFactory.create() : null;
         this.skillsSummary = skillsSummary != null ? skillsSummary : "";
+        this.timeoutSeconds = timeoutSeconds > 0 ? timeoutSeconds : DEFAULT_TIMEOUT_SECONDS;
     }
 
     @Override
@@ -85,11 +98,35 @@ public class TravelAgent implements AgentUnit {
                     "Travel agent has no tool client available.");
         }
 
+        String response;
         try {
             var prompt = toolChatClient.prompt()
                     .system(SYSTEM_PROMPT + (skillsSummary.isEmpty() ? "" : "\n\n" + skillsSummary))
                     .user(task.instruction());
-            String response = prompt.call().content();
+            var executor = Executors.newSingleThreadExecutor();
+            Future<String> future = executor.submit(() -> prompt.call().content());
+            try {
+                response = future.get(timeoutSeconds, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                future.cancel(true);
+                log.warn("TravelAgent tool loop timed out after {}s", timeoutSeconds);
+                return AgentResult.failed(task.taskId(),
+                        "出行服务查询超时（" + timeoutSeconds + "秒），请稍后重试。",
+                        AgentResult.ErrorKind.TIMEOUT);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                future.cancel(true);
+                return AgentResult.failed(task.taskId(), "出行服务查询被中断。");
+            } catch (ExecutionException e) {
+                future.cancel(true);
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException re) {
+                    throw re;
+                }
+                throw new RuntimeException(cause != null ? cause : e);
+            } finally {
+                executor.shutdownNow();
+            }
 
             // Drain map images cached by Amap tools during this execution
             List<byte[]> mapImages = AmapAroundSearchTools.drainMapImages();

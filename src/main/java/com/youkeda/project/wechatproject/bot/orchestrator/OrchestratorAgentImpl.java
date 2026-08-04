@@ -9,6 +9,7 @@ import com.youkeda.project.wechatproject.bot.router.MessageRouter;
 import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
 import com.youkeda.project.wechatproject.bot.service.AiService.ChatRequest;
 import com.youkeda.project.wechatproject.bot.service.AiService.ChatResponse;
+import com.youkeda.project.wechatproject.bot.tool.JsonExtractUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpEntity;
@@ -448,6 +449,14 @@ public class OrchestratorAgentImpl implements OrchestratorAgent {
                 continue;
             }
 
+            // Reject hallucinated agent types at parse time instead of failing later
+            // in the execution loop with an obscure registry exception.
+            if (agentRegistry != null && !agentRegistry.contains(agentType)) {
+                log.warn("orchestrator planned unknown agent_type={}, dropping task (instruction preview: {})",
+                        agentType, instruction.length() > 60 ? instruction.substring(0, 60) + "..." : instruction);
+                continue;
+            }
+
             Map<String, Object> parameters = Map.of();
             Object parametersObj = taskMap.get("parameters");
             if (parametersObj instanceof Map<?, ?> rawParams && !rawParams.isEmpty()) {
@@ -512,25 +521,8 @@ public class OrchestratorAgentImpl implements OrchestratorAgent {
     }
 
     static String extractJson(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-
-        String trimmed = raw.trim();
-        if (trimmed.startsWith("```")) {
-            int start = trimmed.indexOf('\n');
-            int end = trimmed.lastIndexOf("```");
-            if (start < 0 || end <= start) {
-                return null;
-            }
-            trimmed = trimmed.substring(start + 1, end).trim();
-        }
-
-        int firstBrace = trimmed.indexOf('{');
-        int lastBrace = trimmed.lastIndexOf('}');
-        if (firstBrace < 0 || lastBrace <= firstBrace) {
-            return null;
-        }
-        return trimmed.substring(firstBrace, lastBrace + 1);
+        // Delegates to the shared string-aware extractor: naive first-{-to-last-}
+        // slicing breaks when reasoning prose or JSON string values contain braces.
+        return JsonExtractUtil.extractJsonObject(raw);
     }
 }

@@ -49,6 +49,29 @@ public interface AutomationStore {
 
     RecipientBinding saveRecipientBinding(RecipientBinding binding);
 
+    /**
+     * Atomically transition a reminder from {@code expectedStatus} to {@code newStatus}.
+     * Returns the updated reminder, or empty when the reminder does not exist or its
+     * current status does not match (i.e. another thread already claimed it).
+     * <p>
+     * The default implementation is a non-atomic read-modify-write; stores with
+     * stronger guarantees (like {@code JsonAutomationStore}) override it with a
+     * synchronized version so trigger claiming cannot double-fire.
+     */
+    default Optional<Reminder> transitionReminderStatus(String id, ReminderStatus expectedStatus,
+                                                        ReminderStatus newStatus, Instant updatedAt) {
+        Optional<Reminder> existing = findReminder(id);
+        if (existing.isEmpty() || existing.get().status() != expectedStatus) {
+            return Optional.empty();
+        }
+        Reminder r = existing.get();
+        Reminder updated = new Reminder(r.id(), r.title(), r.remindAt(), r.message(), newStatus,
+                r.createdAt(), updatedAt, r.failureMessage(), r.sendAttempts(), r.actionType(),
+                r.actionTarget(), r.recurringTaskId(), r.taskKind(), r.instruction(), r.originalRequest(),
+                r.expectedToolCategories(), r.maxRetries(), r.ownerId());
+        return Optional.of(saveReminder(updated));
+    }
+
     enum ReminderStatus {
         PENDING,
         TRIGGERING,
@@ -107,11 +130,41 @@ public interface AutomationStore {
             String instruction,
             String originalRequest,
             List<String> expectedToolCategories,
-            int maxRetries) {
+            int maxRetries,
+            String ownerId) {
 
         public Reminder {
             taskKind = taskKind != null ? taskKind : AutomationTaskKind.TEXT_REMINDER;
             expectedToolCategories = expectedToolCategories != null ? List.copyOf(expectedToolCategories) : List.of();
+        }
+
+        public Reminder withOwnerId(String newOwnerId) {
+            return new Reminder(id, title, remindAt, message, status, createdAt, updatedAt,
+                    failureMessage, sendAttempts, actionType, actionTarget, recurringTaskId, taskKind,
+                    instruction, originalRequest, expectedToolCategories, maxRetries, newOwnerId);
+        }
+
+        /** Backward-compatible constructor without ownerId (legacy single-recipient behavior). */
+        public Reminder(String id,
+                        String title,
+                        Instant remindAt,
+                        String message,
+                        ReminderStatus status,
+                        Instant createdAt,
+                        Instant updatedAt,
+                        String failureMessage,
+                        int sendAttempts,
+                        AutomationActionType actionType,
+                        String actionTarget,
+                        String recurringTaskId,
+                        AutomationTaskKind taskKind,
+                        String instruction,
+                        String originalRequest,
+                        List<String> expectedToolCategories,
+                        int maxRetries) {
+            this(id, title, remindAt, message, status, createdAt, updatedAt, failureMessage, sendAttempts,
+                    actionType, actionTarget, recurringTaskId, taskKind, instruction, originalRequest,
+                    expectedToolCategories, maxRetries, null);
         }
 
         public Reminder(String id,
@@ -198,11 +251,42 @@ public interface AutomationStore {
             String instruction,
             String originalRequest,
             List<String> expectedToolCategories,
-            int maxRetries) {
+            int maxRetries,
+            String ownerId) {
 
         public RecurringTask {
             taskKind = taskKind != null ? taskKind : AutomationTaskKind.TEXT_REMINDER;
             expectedToolCategories = expectedToolCategories != null ? List.copyOf(expectedToolCategories) : List.of();
+        }
+
+        public RecurringTask withOwnerId(String newOwnerId) {
+            return new RecurringTask(id, title, scheduleType, scheduleExpression, message, timeZone,
+                    nextRunAt, status, createdAt, updatedAt, failureMessage, actionType, actionTarget,
+                    taskKind, instruction, originalRequest, expectedToolCategories, maxRetries, newOwnerId);
+        }
+
+        /** Backward-compatible constructor without ownerId. */
+        public RecurringTask(String id,
+                             String title,
+                             RecurringScheduleType scheduleType,
+                             String scheduleExpression,
+                             String message,
+                             String timeZone,
+                             Instant nextRunAt,
+                             RecurringTaskStatus status,
+                             Instant createdAt,
+                             Instant updatedAt,
+                             String failureMessage,
+                             AutomationActionType actionType,
+                             String actionTarget,
+                             AutomationTaskKind taskKind,
+                             String instruction,
+                             String originalRequest,
+                             List<String> expectedToolCategories,
+                             int maxRetries) {
+            this(id, title, scheduleType, scheduleExpression, message, timeZone, nextRunAt, status,
+                    createdAt, updatedAt, failureMessage, actionType, actionTarget, taskKind,
+                    instruction, originalRequest, expectedToolCategories, maxRetries, null);
         }
 
         public RecurringTask(String id,

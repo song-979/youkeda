@@ -18,6 +18,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -47,6 +48,10 @@ public class VectorMemoryIndex {
     private static final Pattern HEADING = Pattern.compile("^#{1,6}\\s+.+$");
     private static final TypeReference<List<Double>> DOUBLE_LIST_TYPE = new TypeReference<>() {
     };
+    /** Query audit rows older than this are deleted on startup (they also contain raw query text). */
+    private static final Duration QUERY_AUDIT_RETENTION = Duration.ofDays(30);
+    /** Only a truncated query preview is stored in the audit table to limit privacy exposure. */
+    private static final int QUERY_AUDIT_PREVIEW_CHARS = 200;
 
     private final Path dbPath;
     private final EmbeddingClient embeddingClient;
@@ -177,6 +182,28 @@ public class VectorMemoryIndex {
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_index_embeddings_model ON memory_index_embeddings(embedding_model)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_index_queries_user ON memory_index_queries(user_id, created_at)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_index_query_hits_query ON memory_index_query_hits(query_id)");
+            pruneOldQueryAudit(conn);
+        }
+    }
+
+    /**
+     * The query audit tables grow unboundedly (one row per memory retrieval) and store
+     * raw user query text. Keep only a short retention window — long-term debugging
+     * value of old retrieval logs is near zero.
+     */
+    private void pruneOldQueryAudit(Connection conn) throws SQLException {
+        String cutoff = Instant.now().minus(QUERY_AUDIT_RETENTION).toString();
+        try (PreparedStatement ps = conn.prepareStatement(
+                "DELETE FROM memory_index_queries WHERE created_at < ?")) {
+            ps.setString(1, cutoff);
+            int deleted = ps.executeUpdate();
+            if (deleted > 0) {
+                log.info("pruned {} old memory query audit rows (retention {} days)", deleted,
+                        QUERY_AUDIT_RETENTION.toDays());
+            }
+        } catch (SQLException e) {
+            // Table may not exist yet on very old databases; never fail startup over audit cleanup.
+            log.warn("failed to prune memory query audit: {}", e.getMessage());
         }
     }
 
@@ -419,7 +446,10 @@ public class VectorMemoryIndex {
                         """)) {
                     ps.setString(1, userId);
                     ps.setString(2, sha256(query));
-                    ps.setString(3, query);
+                    // store only a truncated preview of the query text to limit how much
+                    // user content accumulates in the audit table
+                    ps.setString(3, query.length() <= QUERY_AUDIT_PREVIEW_CHARS
+                            ? query : query.substring(0, QUERY_AUDIT_PREVIEW_CHARS));
                     ps.setInt(4, topK);
                     ps.setDouble(5, minScore);
                     ps.setString(6, Instant.now().toString());

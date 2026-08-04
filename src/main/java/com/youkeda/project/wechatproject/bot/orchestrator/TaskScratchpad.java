@@ -92,10 +92,12 @@ public class TaskScratchpad {
             sb.append("--- Task ").append(i + 1).append(" ---\n");
             sb.append("Task ID: ").append(r.task.taskId()).append("\n");
             sb.append("Agent: ").append(r.task.agentType()).append("\n");
-            sb.append("Instruction: ").append(r.task.instruction()).append("\n");
+            sb.append("Instruction: ").append(truncate(r.task.instruction(), 500)).append("\n");
             sb.append("Status: ").append(r.result.status()).append("\n");
             if (r.result.rawOutput() != null && !r.result.rawOutput().isEmpty()) {
-                sb.append("Output: ").append(r.result.rawOutput()).append("\n");
+                // rawOutput can be arbitrarily large (browser snapshots, file dumps) —
+                // truncate it so one task cannot blow up the reflect prompt budget.
+                sb.append("Output: ").append(truncate(r.result.rawOutput(), 3000)).append("\n");
             }
             if (r.result.errorMessage() != null) {
                 sb.append("Error: ").append(r.result.errorMessage()).append("\n");
@@ -147,25 +149,31 @@ public class TaskScratchpad {
             List<Map<String, Object>> list = objectMapper.readValue(json,
                     new TypeReference<List<Map<String, Object>>>() {});
             for (Map<String, Object> m : list) {
-                String taskId = str(m, "taskId");
-                String agentType = str(m, "agentType");
-                String instruction = str(m, "instruction");
-                String statusStr = str(m, "status");
-                String rawOutput = str(m, "rawOutput");
-                String errorMessage = str(m, "errorMessage");
-                String messageToUser = str(m, "messageToUser");
+                try {
+                    String taskId = str(m, "taskId");
+                    String agentType = str(m, "agentType");
+                    String instruction = str(m, "instruction");
+                    String statusStr = str(m, "status");
+                    String rawOutput = str(m, "rawOutput");
+                    String errorMessage = str(m, "errorMessage");
+                    String messageToUser = str(m, "messageToUser");
 
-                AgentTask task = new AgentTask(agentType, instruction, Map.of());
-                AgentResult.Status status = AgentResult.Status.valueOf(statusStr);
+                    AgentTask task = new AgentTask(agentType, instruction, Map.of());
+                    AgentResult.Status status = AgentResult.Status.valueOf(statusStr);
 
-                @SuppressWarnings("unchecked")
-                Map<String, Object> resumeState = (Map<String, Object>) m.getOrDefault("resumeState", Map.of());
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> resumeState = (Map<String, Object>) m.getOrDefault("resumeState", Map.of());
 
-                AgentResult result = status == AgentResult.Status.PAUSED
-                        ? AgentResult.paused(taskId, messageToUser, resumeState)
-                        : new AgentResult(taskId, status, null, rawOutput, errorMessage);
+                    AgentResult result = status == AgentResult.Status.PAUSED
+                            ? AgentResult.paused(taskId, messageToUser, resumeState)
+                            : new AgentResult(taskId, status, null, rawOutput, errorMessage);
 
-                sp.record(task, result);
+                    sp.record(task, result);
+                } catch (Exception recordError) {
+                    // A single malformed record (e.g. unknown status from a newer version)
+                    // must not discard the whole scratchpad.
+                    log.warn("skipping malformed scratchpad record: {}", recordError.getMessage());
+                }
             }
         } catch (Exception e) {
             log.error("failed to deserialize TaskScratchpad: {}", json, e);

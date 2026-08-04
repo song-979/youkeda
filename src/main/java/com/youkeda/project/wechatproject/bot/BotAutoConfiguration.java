@@ -42,6 +42,7 @@ import com.youkeda.project.wechatproject.bot.service.AiService.OpenAiCompatibleE
 import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorAgent;
 import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorAgentImpl;
 import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorProperties;
+import com.youkeda.project.wechatproject.bot.router.IntentRouter;
 import com.youkeda.project.wechatproject.bot.router.MessageRouter;
 import com.youkeda.project.wechatproject.bot.router.SimpleModeRouter;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.AudioConverter;
@@ -530,16 +531,25 @@ public class BotAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public IntentRouter intentRouter(AgentRegistry agentRegistry) {
+        log.info("creating IntentRouter (L1/L2 lightweight routing)");
+        return new IntentRouter(agentRegistry);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
     public MessageRouter messageRouter(OrchestratorAgent orchestratorAgent,
                                        AgentRegistry agentRegistry,
                                        ConversationMemory conversationMemory,
                                        VoiceCatalog voiceCatalog,
                                        DocumentService documentService,
                                        OrchestratorProperties orchestratorProperties,
-                                       SimpleModeRouter simpleModeRouter) {
+                                       SimpleModeRouter simpleModeRouter,
+                                       IntentRouter intentRouter) {
         log.info("creating MessageRouter (orchestration mode)");
         return new MessageRouter(orchestratorAgent, agentRegistry, conversationMemory, voiceCatalog,
-                documentService, orchestratorProperties, simpleModeRouter);
+                documentService, orchestratorProperties, simpleModeRouter, intentRouter);
     }
 
     @Bean

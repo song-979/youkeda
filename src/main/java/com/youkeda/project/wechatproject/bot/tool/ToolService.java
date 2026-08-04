@@ -75,24 +75,47 @@ import java.util.stream.Collectors;
 @ConditionalOnProperty(prefix = "agent.tools", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class ToolService {
 
-    /** Tool categories that belong to TravelAgent. */
-    private static final Set<String> TRAVEL_CATEGORIES = Set.of("map_navigation", "didi_taxi");
+    /** Fallback group layout when no configuration overrides it. */
+    private static final Map<String, List<String>> DEFAULT_GROUPS = Map.of(
+            "main", List.of("information", "web_content", "automation", "local_files",
+                    "media_generation", "xiaohongshu"),
+            "travel", List.of("map_navigation", "didi_taxi", "information", "skill"),
+            "browser", List.of("browser", "information", "skill"));
 
-    /** Tool categories that belong to BrowserAgent. */
-    private static final Set<String> BROWSER_CATEGORIES = Set.of("browser");
+    private static List<String> groupCategories(ToolProperties properties, String group) {
+        Map<String, List<String>> groups = properties.getGroups();
+        if (groups != null && groups.containsKey(group)) {
+            return groups.get(group);
+        }
+        return DEFAULT_GROUPS.getOrDefault(group, List.of());
+    }
+
+    /**
+     * Group membership uses explicit inclusion (not exclusion): a tool whose category is
+     * not listed in any group is registered NOWHERE. This prevents new tool categories
+     * from silently leaking into the main runtime — the xiaohongshu MCP tools (14 long
+     * tool schemas) previously flooded the ChatAgent context exactly that way.
+     */
+    private static List<ProjectTool> selectGroup(List<ProjectTool> projectTools,
+                                                 List<String> categories,
+                                                 boolean excludeWeatherInstance) {
+        Set<String> wanted = Set.copyOf(categories);
+        return projectTools.stream()
+                .filter(t -> wanted.contains(t.category()))
+                .filter(t -> !excludeWeatherInstance || !(t instanceof WeatherTools))
+                .toList();
+    }
 
     @Primary
     @Bean
     @ConditionalOnMissingBean
     public ToolRuntime toolRuntime(List<ProjectTool> projectTools,
-                                   ObjectProvider<RecipientBindingListener> recipientBindingListenerProvider) {
+                                   ObjectProvider<RecipientBindingListener> recipientBindingListenerProvider,
+                                   ToolProperties toolProperties) {
         recipientBindingListenerProvider.getIfAvailable();
-        List<ProjectTool> nonAgentTools = projectTools.stream()
-                .filter(t -> !TRAVEL_CATEGORIES.contains(t.category()))
-                .filter(t -> !BROWSER_CATEGORIES.contains(t.category()))
-                .filter(t -> !(t instanceof WeatherTools))
-                .toList();
-        return new ToolRuntime(nonAgentTools);
+        List<ProjectTool> mainTools = selectGroup(projectTools,
+                groupCategories(toolProperties, "main"), true);
+        return new ToolRuntime(mainTools);
     }
 
     @Primary
@@ -104,13 +127,13 @@ public class ToolService {
 
     @Bean
     @ConditionalOnMissingBean(name = "travelToolRuntime")
-    public ToolRuntime travelToolRuntime(List<ProjectTool> projectTools) {
-        List<ProjectTool> travelTools = new ArrayList<>();
+    public ToolRuntime travelToolRuntime(List<ProjectTool> projectTools, ToolProperties toolProperties) {
+        List<ProjectTool> travelTools = new ArrayList<>(selectGroup(projectTools,
+                groupCategories(toolProperties, "travel"), false));
+        // WeatherTools has category "information" but belongs to the travel runtime;
+        // ensure it is present even when a custom group layout excludes "information".
         for (ProjectTool tool : projectTools) {
-            if (TRAVEL_CATEGORIES.contains(tool.category())
-                    || tool instanceof WeatherTools
-                    || "skill".equals(tool.category())
-                    || "information".equals(tool.category())) {
+            if (tool instanceof WeatherTools && !travelTools.contains(tool)) {
                 travelTools.add(tool);
             }
         }
@@ -126,14 +149,9 @@ public class ToolService {
 
     @Bean
     @ConditionalOnMissingBean(name = "browserToolRuntime")
-    public ToolRuntime browserToolRuntime(List<ProjectTool> projectTools) {
-        List<ProjectTool> browserTools = new ArrayList<>();
-        for (ProjectTool tool : projectTools) {
-            if (BROWSER_CATEGORIES.contains(tool.category()) || "skill".equals(tool.category())
-                    || "information".equals(tool.category())) {
-                browserTools.add(tool);
-            }
-        }
+    public ToolRuntime browserToolRuntime(List<ProjectTool> projectTools, ToolProperties toolProperties) {
+        List<ProjectTool> browserTools = selectGroup(projectTools,
+                groupCategories(toolProperties, "browser"), false);
         return new ToolRuntime(browserTools);
     }
 
@@ -280,7 +298,11 @@ public class ToolService {
     // 浏览器自动化工具（chrome-devtools-mcp）
     // -------------------------------------------------------------------------
 
-    @Bean
+    /**
+     * destroyMethod="stop" is essential: without it the chrome-devtools-mcp child
+     * process (and its Chrome instance) survives JVM shutdown as an orphan.
+     */
+    @Bean(destroyMethod = "stop")
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.tools.browser", name = "enabled", havingValue = "true")
     public BrowserMcpProcess browserMcpProcess(BrowserMcpProperties browserMcpProperties) throws IOException {
@@ -435,6 +457,12 @@ public class ToolService {
     @ConfigurationProperties(prefix = "agent.tools")
     public static class ToolProperties {
         private boolean enabled = true;
+        /**
+         * Optional override of tool-group membership: group name -> tool categories.
+         * Example: agent.tools.groups.travel=map_navigation,didi_taxi,information,skill
+         * Groups not present here fall back to the built-in defaults.
+         */
+        private Map<String, List<String>> groups;
 
         public boolean isEnabled() {
             return enabled;
@@ -442,6 +470,14 @@ public class ToolService {
 
         public void setEnabled(boolean enabled) {
             this.enabled = enabled;
+        }
+
+        public Map<String, List<String>> getGroups() {
+            return groups;
+        }
+
+        public void setGroups(Map<String, List<String>> groups) {
+            this.groups = groups;
         }
     }
 }

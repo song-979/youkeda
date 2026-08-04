@@ -19,6 +19,12 @@ public class OrchestrationResult {
     private final List<AgentTask> tasks;
     private final ModelReply finalReply;
     private final TaskScratchpad scratchpad;
+    /**
+     * When true, the router skips the reflect LLM call after executing the tasks.
+     * Set by lightweight routers (IntentRouter) for high-confidence single-step plans
+     * where a reflection round would only waste a model call.
+     */
+    private final boolean skipReflection;
 
     private OrchestrationResult(Builder builder) {
         this.status = builder.status;
@@ -27,6 +33,7 @@ public class OrchestrationResult {
         this.tasks = builder.tasks != null ? List.copyOf(builder.tasks) : List.of();
         this.finalReply = builder.finalReply;
         this.scratchpad = builder.scratchpad != null ? builder.scratchpad : new TaskScratchpad();
+        this.skipReflection = builder.skipReflection;
     }
 
     public Status status() { return status; }
@@ -35,6 +42,7 @@ public class OrchestrationResult {
     public List<AgentTask> tasks() { return tasks; }
     public ModelReply finalReply() { return finalReply; }
     public TaskScratchpad scratchpad() { return scratchpad; }
+    public boolean skipReflection() { return skipReflection; }
 
     public static Builder builder() { return new Builder(); }
 
@@ -45,6 +53,7 @@ public class OrchestrationResult {
         private List<AgentTask> tasks;
         private ModelReply finalReply;
         private TaskScratchpad scratchpad;
+        private boolean skipReflection;
 
         public Builder status(Status status) { this.status = status; return this; }
         public Builder reasoning(String reasoning) { this.reasoning = reasoning; return this; }
@@ -52,6 +61,7 @@ public class OrchestrationResult {
         public Builder tasks(List<AgentTask> tasks) { this.tasks = tasks; return this; }
         public Builder finalReply(ModelReply reply) { this.finalReply = reply; return this; }
         public Builder scratchpad(TaskScratchpad sp) { this.scratchpad = sp; return this; }
+        public Builder skipReflection(boolean skip) { this.skipReflection = skip; return this; }
 
         public OrchestrationResult build() {
             return new OrchestrationResult(this);

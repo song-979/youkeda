@@ -1,11 +1,14 @@
 package com.youkeda.project.wechatproject.bot.tool.chat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -13,6 +16,8 @@ import java.util.List;
 import java.util.Optional;
 
 public class JsonAutomationStore implements AutomationStore {
+
+    private static final Logger log = LoggerFactory.getLogger(JsonAutomationStore.class);
 
     private final Path storageFile;
     private final ObjectMapper objectMapper;
@@ -126,6 +131,25 @@ public class JsonAutomationStore implements AutomationStore {
         return binding;
     }
 
+    /**
+     * Atomic claim of a reminder status transition. The whole check-and-set happens
+     * under the store monitor so concurrent triggers cannot both pass the status check.
+     */
+    @Override
+    public synchronized Optional<Reminder> transitionReminderStatus(String id, ReminderStatus expectedStatus,
+                                                                    ReminderStatus newStatus, Instant updatedAt) {
+        Optional<Reminder> existing = findReminder(id);
+        if (existing.isEmpty() || existing.get().status() != expectedStatus) {
+            return Optional.empty();
+        }
+        Reminder r = existing.get();
+        Reminder updated = new Reminder(r.id(), r.title(), r.remindAt(), r.message(), newStatus,
+                r.createdAt(), updatedAt, r.failureMessage(), r.sendAttempts(), r.actionType(),
+                r.actionTarget(), r.recurringTaskId(), r.taskKind(), r.instruction(), r.originalRequest(),
+                r.expectedToolCategories(), r.maxRetries(), r.ownerId());
+        return Optional.of(saveReminder(updated));
+    }
+
     private State load() {
         try {
             Files.createDirectories(storageFile.getParent());
@@ -135,14 +159,42 @@ public class JsonAutomationStore implements AutomationStore {
             State loaded = objectMapper.readValue(storageFile.toFile(), State.class);
             return loaded != null ? loaded.normalize() : new State();
         } catch (IOException e) {
-            throw new UncheckedIOException("Failed to load automation store: " + storageFile, e);
+            // A corrupted store must not prevent the application from starting:
+            // quarantine the broken file and start fresh.
+            log.error("Failed to load automation store {}, quarantining it and starting empty: {}",
+                    storageFile, e.getMessage());
+            quarantineCorruptFile();
+            return new State();
         }
     }
 
+    private void quarantineCorruptFile() {
+        try {
+            Path corruptCopy = storageFile.resolveSibling(
+                    storageFile.getFileName() + ".corrupt-" + System.currentTimeMillis());
+            Files.move(storageFile, corruptCopy, StandardCopyOption.REPLACE_EXISTING);
+            log.info("corrupted automation store moved to {}", corruptCopy);
+        } catch (IOException moveError) {
+            log.warn("failed to quarantine corrupted automation store: {}", moveError.getMessage());
+        }
+    }
+
+    /**
+     * Persist via write-to-temp-then-atomic-move so a crash mid-write cannot leave a
+     * truncated automation.json behind.
+     */
     private void persist() {
         try {
             Files.createDirectories(storageFile.getParent());
-            objectMapper.writerWithDefaultPrettyPrinter().writeValue(storageFile.toFile(), state);
+            Path tempFile = storageFile.resolveSibling(storageFile.getFileName() + ".tmp");
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(tempFile.toFile(), state);
+            try {
+                Files.move(tempFile, storageFile,
+                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                // Filesystem does not support atomic move; fall back to a plain replace.
+                Files.move(tempFile, storageFile, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to persist automation store: " + storageFile, e);
         }
