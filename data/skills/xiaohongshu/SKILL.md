@@ -1,5 +1,6 @@
 ---
 name: xiaohongshu
+agent: CHAT
 description: 小红书账号登录、搜索笔记、读取笔记详情/评论、用户主页、评论/回复、点赞/取消点赞、收藏/取消收藏、发布图文/视频。当用户提到小红书、笔记、博主、作者主页、点赞、评论、收藏、登录账号、扫码登录时触发。
 allowed-categories: xiaohongshu, skill
 priority: 10

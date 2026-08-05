@@ -12,6 +12,12 @@ public class AutomationProperties {
     private int schedulerPoolSize = 2;
     private int maxSendAttempts = 3;
     private boolean sendMissedRemindersOnStartup = false;
+    private boolean heartbeatEnabled = true;
+    private int heartbeatWatchdogMinutes = 60;
+    private int heartbeatFallbackMinutes = 60;
+    private int heartbeatMinIntervalMinutes = 10;
+    private int heartbeatMaxIntervalHours = 24;
+    private int heartbeatBusyDeferralMinutes = 10;
 
     public boolean isEnabled() {
         return enabled;
@@ -67,5 +73,53 @@ public class AutomationProperties {
 
     public void setSendMissedRemindersOnStartup(boolean sendMissedRemindersOnStartup) {
         this.sendMissedRemindersOnStartup = sendMissedRemindersOnStartup;
+    }
+
+    public boolean isHeartbeatEnabled() {
+        return heartbeatEnabled;
+    }
+
+    public void setHeartbeatEnabled(boolean heartbeatEnabled) {
+        this.heartbeatEnabled = heartbeatEnabled;
+    }
+
+    public int getHeartbeatWatchdogMinutes() {
+        return heartbeatWatchdogMinutes;
+    }
+
+    public void setHeartbeatWatchdogMinutes(int heartbeatWatchdogMinutes) {
+        this.heartbeatWatchdogMinutes = heartbeatWatchdogMinutes;
+    }
+
+    public int getHeartbeatFallbackMinutes() {
+        return heartbeatFallbackMinutes;
+    }
+
+    public void setHeartbeatFallbackMinutes(int heartbeatFallbackMinutes) {
+        this.heartbeatFallbackMinutes = heartbeatFallbackMinutes;
+    }
+
+    public int getHeartbeatMinIntervalMinutes() {
+        return heartbeatMinIntervalMinutes;
+    }
+
+    public void setHeartbeatMinIntervalMinutes(int heartbeatMinIntervalMinutes) {
+        this.heartbeatMinIntervalMinutes = heartbeatMinIntervalMinutes;
+    }
+
+    public int getHeartbeatMaxIntervalHours() {
+        return heartbeatMaxIntervalHours;
+    }
+
+    public void setHeartbeatMaxIntervalHours(int heartbeatMaxIntervalHours) {
+        this.heartbeatMaxIntervalHours = heartbeatMaxIntervalHours;
+    }
+
+    public int getHeartbeatBusyDeferralMinutes() {
+        return heartbeatBusyDeferralMinutes;
+    }
+
+    public void setHeartbeatBusyDeferralMinutes(int heartbeatBusyDeferralMinutes) {
+        this.heartbeatBusyDeferralMinutes = heartbeatBusyDeferralMinutes;
     }
 }

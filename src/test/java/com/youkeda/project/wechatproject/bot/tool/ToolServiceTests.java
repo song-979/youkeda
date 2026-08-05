@@ -38,7 +38,8 @@ import static org.mockito.Mockito.when;
 
 @SpringBootTest(properties = {
         "ilink.enabled=false",
-        "agent.speech.enabled=false"
+        "agent.speech.enabled=false",
+        "agent.tools.automation.heartbeat-enabled=false"
 })
 class ToolServiceTests {
 

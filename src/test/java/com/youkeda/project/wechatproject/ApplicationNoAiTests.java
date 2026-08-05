@@ -14,7 +14,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest(properties = {
         "ilink.auto-login=false",
-        "agent.ai.enabled=false"
+        "agent.ai.enabled=false",
+        "agent.tools.automation.heartbeat-enabled=false"
 })
 class ApplicationNoAiTests {
 

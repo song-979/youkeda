@@ -1,18 +1,4 @@
 {
-  "loginContext" : {
-    "botToken" : "5a832854f336@im.bot:0600002ea43446318095ebdb510c6ef5c1ea78",
-    "userId" : "o9cq807d5yyDrD5d1Ul5MpjU_mvc@im.wechat",
-    "botId" : "5a832854f336@im.bot",
-    "baseUrl" : "https://ilinkai.weixin.qq.com"
-  },
-  "updatesCursor" : "ChAIBBCPzdHp+jMYkqaq6fozEjo1YTgzMjg1NGYzMzZAaW0uYm90OjA2MDAwMDJlYTQzNDQ2MzE4MDk1ZWJkYjUxMGM2ZWY1YzFlYTc4",
-  "conversationContexts" : {
-    "o9cq807d5yyDrD5d1Ul5MpjU_mvc@im.wechat" : {
-      "botId" : "5a832854f336@im.bot",
-      "userId" : "o9cq807d5yyDrD5d1Ul5MpjU_mvc@im.wechat",
-      "latestContextToken" : "AARzJWAFAAABAAAAAADSGU69GlU8j/6UyMdpaiAAAAB+9905Q6UiugPBawU3n3cyzQX+LkN8ofRzsCZYN0mt7iofWX6kL9o4S0MN7r9ZRwOWiF9JEyI05gHP8DnL2NiSChNGMzNH",
-      "sourceMessageId" : 7488163577267982728,
-      "sourceMessageTime" : 1785317320080
-    }
-  }
+  "format" : "aes-gcm-v1",
+  "ciphertext" : "bE0/StDckiyNYRX33UehifdjzNpfPSewleZB7XmsDNW0tjCsTmX5EJaZt//o7XA5qcAdNtLNlko+n8Ye6XBH0RZsDy7rTNpi35lvyRx4oHDkIW5xRcK2lJrpHaP7kOK0LafxBESF09O5d9FxFhGE8VYamDi0glTvnrlNkgKnfTcQk8PDgZCjanXqo+p+/bZHGqdMr+b0kXZm4O1ttMepCeJAPDc/9p5Jdfw1CYSVD53k4YARfaMtE3j9SFiqohx56Nu69yJhQ9nFS4ZIJfD6A7NJSVtYPw3sTJ/LhGNK2miPHtc6Bpg8cYTfuUa59F2uIzaWu1BaK0kdWIn+3X6kJEb46kuNF/gZ98PRGMT9X1Xb0OxFPlz5PIwGFo5c/DXF9cmSNI4JlAyz78zEhmhsANrI3ZF0/mI7FH28XE0VdaS8zdw102QQ52OITe4bsj4ZW1vdzsAW+5E65a7vVU68gUyZlh0Ym0qu0itl1M0proHgzRwgfu4sIwVEHcb8wbg0oSs2iZIcA3wQxqbBmZ0yaFDu4+8OUo5EiunHfX9C9VmDh0+K2vSFdz05bbusMS3D+VTsqXfq5cGwOgcICXMDkPL3KHATIX0e5pCgjgqK/UuzgcGEGDeYnW2THorB5caX5uTaIeeNL2x4tW97B//zKKCOj2KPxR7AIPUaeYKbJ04sil87s+ZIhcdXMoFcv5iZJ38HjflwCijamlUw043cSiQohEr/qxSudXJmsidjn4d3lK+9RmVgeoB8p3NYiFi9/z3znyU9XPdnX4FPwNJ7hLhX6gkSl1n3hCOilpatKIdsPnZIiAD6m498pLJFeeD0LEuWQUQXaY+75N5bbN9c+1Z4aRT9O3k4NtkyhxKVR5BC2fxxvYw3T9R+hWdKUgyth5EkUOvGqx9DcBlpdAGoKkU+nSY4MMZfEw8bi7KIDvVa8IIPykuAEi/esowe/qm20JNYHimdHyjbK1zxFBdDzp5J6pEdHC6+q1WdRkn8temjNLXG9ay4faGbjqXanOE6WYOFPbdd5KwYV6tQ6pcYcT3Wufn0cX1xAWQpgqytclLp9OhFHHNYqYacALDpvsQqV38yyySnZKTEQl94RElBRO/JBiDFHBRAQSLBoE/hvAvdyC0ejp8mhZVVrq+mvJhlIYFp"
 }

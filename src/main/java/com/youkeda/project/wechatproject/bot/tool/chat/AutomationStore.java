@@ -49,6 +49,21 @@ public interface AutomationStore {
 
     RecipientBinding saveRecipientBinding(RecipientBinding binding);
 
+    default Optional<Reminder> transitionReminderStatus(String id, ReminderStatus expectedStatus,
+                                                        ReminderStatus newStatus, Instant updatedAt) {
+        Optional<Reminder> existing = findReminder(id);
+        if (existing.isEmpty() || existing.get().status() != expectedStatus) {
+            return Optional.empty();
+        }
+        Reminder reminder = existing.get();
+        Reminder updated = new Reminder(reminder.id(), reminder.title(), reminder.remindAt(), reminder.message(),
+                newStatus, reminder.createdAt(), updatedAt, reminder.failureMessage(), reminder.sendAttempts(),
+                reminder.actionType(), reminder.actionTarget(), reminder.recurringTaskId(), reminder.taskKind(),
+                reminder.instruction(), reminder.originalRequest(), reminder.expectedToolCategories(),
+                reminder.maxRetries(), reminder.ownerId());
+        return Optional.of(saveReminder(updated));
+    }
+
     enum ReminderStatus {
         PENDING,
         TRIGGERING,
@@ -87,7 +102,8 @@ public interface AutomationStore {
 
     enum AutomationTaskKind {
         TEXT_REMINDER,
-        LLM_TASK
+        LLM_TASK,
+        AGENT_HEARTBEAT
     }
 
     record Reminder(
@@ -107,11 +123,28 @@ public interface AutomationStore {
             String instruction,
             String originalRequest,
             List<String> expectedToolCategories,
-            int maxRetries) {
+            int maxRetries,
+            String ownerId) {
 
         public Reminder {
             taskKind = taskKind != null ? taskKind : AutomationTaskKind.TEXT_REMINDER;
             expectedToolCategories = expectedToolCategories != null ? List.copyOf(expectedToolCategories) : List.of();
+        }
+
+        public Reminder withOwnerId(String newOwnerId) {
+            return new Reminder(id, title, remindAt, message, status, createdAt, updatedAt,
+                    failureMessage, sendAttempts, actionType, actionTarget, recurringTaskId, taskKind,
+                    instruction, originalRequest, expectedToolCategories, maxRetries, newOwnerId);
+        }
+
+        public Reminder(String id, String title, Instant remindAt, String message, ReminderStatus status,
+                        Instant createdAt, Instant updatedAt, String failureMessage, int sendAttempts,
+                        AutomationActionType actionType, String actionTarget, String recurringTaskId,
+                        AutomationTaskKind taskKind, String instruction, String originalRequest,
+                        List<String> expectedToolCategories, int maxRetries) {
+            this(id, title, remindAt, message, status, createdAt, updatedAt, failureMessage, sendAttempts,
+                    actionType, actionTarget, recurringTaskId, taskKind, instruction, originalRequest,
+                    expectedToolCategories, maxRetries, null);
         }
 
         public Reminder(String id,
@@ -198,11 +231,29 @@ public interface AutomationStore {
             String instruction,
             String originalRequest,
             List<String> expectedToolCategories,
-            int maxRetries) {
+            int maxRetries,
+            String ownerId) {
 
         public RecurringTask {
             taskKind = taskKind != null ? taskKind : AutomationTaskKind.TEXT_REMINDER;
             expectedToolCategories = expectedToolCategories != null ? List.copyOf(expectedToolCategories) : List.of();
+        }
+
+        public RecurringTask withOwnerId(String newOwnerId) {
+            return new RecurringTask(id, title, scheduleType, scheduleExpression, message, timeZone,
+                    nextRunAt, status, createdAt, updatedAt, failureMessage, actionType, actionTarget,
+                    taskKind, instruction, originalRequest, expectedToolCategories, maxRetries, newOwnerId);
+        }
+
+        public RecurringTask(String id, String title, RecurringScheduleType scheduleType,
+                             String scheduleExpression, String message, String timeZone, Instant nextRunAt,
+                             RecurringTaskStatus status, Instant createdAt, Instant updatedAt,
+                             String failureMessage, AutomationActionType actionType, String actionTarget,
+                             AutomationTaskKind taskKind, String instruction, String originalRequest,
+                             List<String> expectedToolCategories, int maxRetries) {
+            this(id, title, scheduleType, scheduleExpression, message, timeZone, nextRunAt, status,
+                    createdAt, updatedAt, failureMessage, actionType, actionTarget, taskKind,
+                    instruction, originalRequest, expectedToolCategories, maxRetries, null);
         }
 
         public RecurringTask(String id,

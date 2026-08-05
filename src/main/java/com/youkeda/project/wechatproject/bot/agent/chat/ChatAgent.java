@@ -1,9 +1,16 @@
 package com.youkeda.project.wechatproject.bot.agent.chat;
 
 import com.youkeda.project.wechatproject.bot.agent.AgentCapability;
+import com.youkeda.project.wechatproject.bot.agent.AgentContextAssembler;
 import com.youkeda.project.wechatproject.bot.agent.AgentResult;
 import com.youkeda.project.wechatproject.bot.agent.AgentTask;
 import com.youkeda.project.wechatproject.bot.agent.AgentUnit;
+import com.youkeda.project.wechatproject.bot.memory.AgentMemory;
+import com.youkeda.project.wechatproject.bot.memory.FileBasedAgentMemory;
+import com.youkeda.project.wechatproject.bot.context.ContextEngineeringService;
+import com.youkeda.project.wechatproject.bot.context.ContextPackage;
+import com.youkeda.project.wechatproject.bot.context.ContextStage;
+import com.youkeda.project.wechatproject.bot.context.ToolLoopContextRuntime;
 import com.youkeda.project.wechatproject.bot.model.ModelReply;
 import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
 import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
@@ -12,6 +19,11 @@ import com.youkeda.project.wechatproject.bot.tool.browser.BrowserTools;
 import com.youkeda.project.wechatproject.bot.tool.chat.LocalFileTools;
 import com.youkeda.project.wechatproject.bot.tool.chat.MotouTool;
 import com.youkeda.project.wechatproject.bot.tool.chat.UserMessageTool;
+import com.youkeda.project.wechatproject.bot.tool.chat.AgentSleepTool;
+import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
+import com.youkeda.project.wechatproject.bot.tool.chat.RagTools;
+import com.youkeda.project.wechatproject.bot.tool.chat.SkillTools;
+import com.youkeda.project.wechatproject.bot.tool.travel.DiDiTaxiTools;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +39,7 @@ import org.springframework.util.MimeTypeUtils;
 import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -35,38 +48,76 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class ChatAgent implements AgentUnit {
 
     private static final Logger log = LoggerFactory.getLogger(ChatAgent.class);
+    private static final String HEARTBEAT_SYSTEM_PROMPT = """
+            You are in a private heartbeat decision round for the same assistant identity.
+            Keep the assistant's normal personality, relationship continuity, and factual standards,
+            but do not answer as though the user just sent a message. This round is operational and
+            is isolated from ordinary conversation: no tools are available and the internal event
+            must never be quoted or exposed to the user.
+
+            Use the supplied conversation context and sleeping-task list to exercise restrained judgment:
+            - Consider unfinished conversational threads, the user's recent mood, whether a timely check-in
+              would genuinely help, and whether a listed sleeping task is ready to continue.
+            - Silence is a valid and often preferable choice, but do not choose it mechanically when there
+              is clear, timely value in contacting the user.
+            - Resume only an explicitly listed SLEEPING task. Never resume a task waiting for user input or
+              one manually paused by the user.
+            - A retryNode has already passed the system's strict transient-failure and safety checks. Resume it
+              only at or after notBefore; never reinterpret a terminal failure as retryable.
+            - Choose the next wake time deliberately from urgency, uncertainty, task timing, and quiet hours.
+              Do not default to hourly polling when nothing warrants it.
+            - A proactive message must be brief, natural, context-grounded, and ready to send unchanged.
+
+            Return exactly one compact JSON object and no surrounding prose:
+            {"action":"SILENT|CHAT|RESUME_TASK","dagId":null,"message":null,
+             "nextWakeAt":"ISO-8601 datetime with timezone","reason":"short operational reason"}
+            """;
     private final AiModelClient chatClient;
     private final AgentProperties agentProperties;
     private final ChatClient toolChatClient;
     private final String toolCategories;
     private final String skillsSummary;
+    private final AgentMemory agentMemory;
+    private final ContextEngineeringService contextEngineeringService;
 
     public ChatAgent(AiModelClient chatClient) {
-        this(chatClient, null, null, "", "");
+        this(chatClient, null, null, "", "", null);
     }
 
     public ChatAgent(AiModelClient chatClient, AgentProperties agentProperties,
                      ToolChatClientFactory toolChatClientFactory) {
-        this(chatClient, agentProperties, toolChatClientFactory, "", "");
-    }
-
-    public ChatAgent(AiModelClient chatClient, AgentProperties agentProperties,
-                     ToolChatClientFactory toolChatClientFactory, String toolCategories) {
-        this(chatClient, agentProperties, toolChatClientFactory, toolCategories, "");
+        this(chatClient, agentProperties, toolChatClientFactory, "", "", null);
     }
 
     public ChatAgent(AiModelClient chatClient, AgentProperties agentProperties,
                      ToolChatClientFactory toolChatClientFactory, String toolCategories,
                      String skillsSummary) {
+        this(chatClient, agentProperties, toolChatClientFactory, toolCategories, skillsSummary, null);
+    }
+
+    public ChatAgent(AiModelClient chatClient, AgentProperties agentProperties,
+                     ToolChatClientFactory toolChatClientFactory, String toolCategories,
+                     String skillsSummary, AgentMemory agentMemory) {
+        this(chatClient, agentProperties, toolChatClientFactory, toolCategories, skillsSummary,
+                agentMemory, null);
+    }
+
+    public ChatAgent(AiModelClient chatClient, AgentProperties agentProperties,
+                     ToolChatClientFactory toolChatClientFactory, String toolCategories,
+                     String skillsSummary, AgentMemory agentMemory,
+                     ContextEngineeringService contextEngineeringService) {
         this.chatClient = chatClient;
         this.agentProperties = agentProperties;
         this.toolChatClient = toolChatClientFactory != null ? toolChatClientFactory.create() : null;
         this.toolCategories = toolCategories != null ? toolCategories : "";
         this.skillsSummary = skillsSummary != null ? skillsSummary : "";
+        this.agentMemory = agentMemory;
+        this.contextEngineeringService = contextEngineeringService;
     }
 
     @Override
@@ -78,6 +129,7 @@ public class ChatAgent implements AgentUnit {
     public AgentCapability getCapability() {
         boolean hasMapTools = toolCategories.contains("map_navigation");
         boolean hasSearchTools = toolCategories.contains("information");
+        boolean hasXiaohongshuTools = toolCategories.contains("xiaohongshu");
         String desc = "Handles dialogue, writing, analysis, vision-language responses, and tool-assisted runtime tasks.";
         if (!toolCategories.isEmpty()) {
             desc += " Internal tool categories: " + toolCategories + ".";
@@ -92,6 +144,9 @@ public class ChatAgent implements AgentUnit {
         if (hasAutomationTools) {
             desc += " Can create/manage reminders, timers, alarms, recurring reminders, and schedule items.";
         }
+        if (hasXiaohongshuTools) {
+            desc += " Can search Xiaohongshu notes, read note details/comments, view user profiles, comment/reply, like/favorite, and publish image/video notes via MCP tools.";
+        }
         List<String> strengths = new ArrayList<>(List.of("dialogue", "writing", "analysis", "vision", "runtime-tools"));
         if (hasMapTools) {
             strengths.addAll(List.of("place-search", "nearby-search", "route-planning", "map-navigation", "geocoding"));
@@ -102,11 +157,20 @@ public class ChatAgent implements AgentUnit {
         if (hasAutomationTools) {
             strengths.addAll(List.of("reminder", "timer", "alarm", "schedule", "recurring-reminder"));
         }
+        if (hasXiaohongshuTools) {
+            strengths.addAll(List.of("xiaohongshu-search", "xiaohongshu-publish", "xiaohongshu-social"));
+        }
+        // Build routing keywords dynamically based on available tools
+        List<String> routingKeywords = new ArrayList<>();
+        if (hasXiaohongshuTools) {
+            routingKeywords.addAll(List.of("小红书", "笔记", "博主", "点赞", "收藏", "评论"));
+        }
         return new AgentCapability(
                 "chat-generation",
                 desc,
                 strengths,
-                "text"
+                "text",
+                routingKeywords
         );
     }
 
@@ -114,39 +178,75 @@ public class ChatAgent implements AgentUnit {
     public AgentResult execute(AgentTask task) throws IOException {
         log.info("ChatAgent executing task: instruction={}", task.instruction());
 
-        List<String> imageUrls = stringList(task.parameters().get("imageUrls"));
-        List<ChatRequest.Message> history = historyList(task.parameters().get("history"));
+        String userId = stringParam(task.parameters(), "userId");
+        String dagId = stringParam(task.parameters(), "dagId");
+        List<String> imageUrls = task.executionContext() != null
+                ? task.executionContext().imageUrls()
+                : stringList(task.parameters().get("imageUrls"));
+        ContextStage stage = task.executionContext() != null
+                ? task.executionContext().stage() : ContextStage.EXECUTE;
+        String effectiveSystemPrompt = buildEffectiveSystemPrompt(
+                userId, task.instruction(), stage);
+        ContextPackage context = AgentContextAssembler.build(
+                contextEngineeringService, task, effectiveSystemPrompt, agentMemory);
 
         String response;
-        if (canUseToolLoop()) {
+        var pendingDrainRef = new AtomicReference<UserMessageTool.PendingUserMessage>();
+        var sleepDrainRef = new AtomicReference<AgentSleepTool.PendingSleep>();
+        var screenshotsDrainRef = new AtomicReference<List<byte[]>>();
+        var transcriptReportRef = new AtomicReference<ToolLoopContextRuntime.Report>();
+
+        boolean toolsEnabled = !Boolean.TRUE.equals(task.parameters().get("disableTools"));
+        if (canUseToolLoop() && toolsEnabled) {
             try {
-                response = chatWithTools(task.instruction(), imageUrls, history);
+                response = chatWithTools(userId, dagId, context, imageUrls,
+                        pendingDrainRef, sleepDrainRef, screenshotsDrainRef, transcriptReportRef);
             } catch (RuntimeException e) {
                 log.warn("ChatAgent tool loop failed: {}", e.getMessage());
                 if (chatClient != null) {
                     log.info("Falling back to legacy chat client (no tools)");
-                    response = fallbackChat(task.instruction(), imageUrls, history);
+                    response = fallbackChat(context, imageUrls);
                 } else {
                     return AgentResult.failed(task.taskId(), "对话服务暂不可用：" + e.getMessage());
                 }
             }
         } else {
-            response = chatClient.chatStream(task.instruction(), imageUrls, history);
+            response = fallbackChat(context, imageUrls);
         }
 
-        // Detect PAUSED signal from LLM output
-        if (response != null && response.startsWith("__PAUSED__:")) {
-            String messageToUser = response.substring("__PAUSED__:".length()).trim();
+        // Detect PAUSED signal from LLM output, or force PAUSED if pending images exist
+        UserMessageTool.PendingUserMessage pending = pendingDrainRef.get();
+        AgentSleepTool.PendingSleep pendingSleep = sleepDrainRef.get();
+        List<byte[]> drainedScreenshots = screenshotsDrainRef.get() != null
+                ? screenshotsDrainRef.get() : List.of();
 
-            UserMessageTool.PendingUserMessage pending = UserMessageTool.drain();
-            String effectiveMessage = (pending != null && !pending.text().isBlank())
-                    ? pending.text() : messageToUser;
+        boolean hasPendingImages = (pending != null && !pending.images().isEmpty())
+                || !drainedScreenshots.isEmpty();
+        boolean isPaused = response != null && response.startsWith("__PAUSED__:");
 
+        if (pendingSleep != null) {
+            Map<String, Object> resumeState = new LinkedHashMap<>();
+            resumeState.put("pauseType", "TIME");
+            resumeState.put("wakeAt", pendingSleep.wakeAt().toString());
+            resumeState.put("wakeReason", pendingSleep.reason() != null ? pendingSleep.reason() : "external wait");
+            log.info("ChatAgent SLEEPING: dagId={}, wakeAt={}", pendingSleep.dagId(), pendingSleep.wakeAt());
+            return AgentResult.paused(task.taskId(), null, resumeState);
+        }
+
+        if (isPaused || hasPendingImages) {
+            String pausedText = isPaused
+                    ? response.substring("__PAUSED__:".length()).trim()
+                    : "";
+            String effectiveMessage;
             List<byte[]> allImages = new ArrayList<>();
+
             if (pending != null) {
+                effectiveMessage = !pending.text().isBlank() ? pending.text() : pausedText;
                 allImages.addAll(pending.images());
+            } else {
+                effectiveMessage = pausedText;
             }
-            allImages.addAll(BrowserTools.drainScreenshots());
+            allImages.addAll(drainedScreenshots);
 
             List<ModelReply.ImagePayload> imagePayloads = new ArrayList<>();
             for (int i = 0; i < allImages.size(); i++) {
@@ -155,7 +255,9 @@ public class ChatAgent implements AgentUnit {
             }
 
             log.info("ChatAgent PAUSED: message={}, images={}", effectiveMessage, imagePayloads.size());
-            return AgentResult.paused(task.taskId(), effectiveMessage, Map.of(), imagePayloads);
+            ToolLoopContextRuntime.Report report = transcriptReportRef.get();
+            return AgentResult.paused(task.taskId(), effectiveMessage,
+                    report != null ? report.resumeState() : Map.of(), imagePayloads);
         }
 
         String motouGifPath = MotouTool.getAndClearLastGifPath();
@@ -169,17 +271,21 @@ public class ChatAgent implements AgentUnit {
         }
 
         log.info("ChatAgent response: {} chars", response != null ? response.length() : 0);
-        return AgentResult.success(task.taskId(), response, response);
+        Map<String, String> signals = buildSignals(response);
+        if (transcriptReportRef.get() != null) {
+            signals.putAll(transcriptReportRef.get().signals());
+        }
+        return AgentResult.success(task.taskId(), response, response, signals);
     }
 
-    private String fallbackChat(String instruction, List<String> imageUrls,
-                                 List<ChatRequest.Message> history) {
+    private String fallbackChat(ContextPackage context, List<String> imageUrls) {
         long timeoutSeconds = agentProperties != null
                 ? Math.max(30, agentProperties.getToolCallTimeoutSeconds() / 2) : 60;
 
         var executor = Executors.newSingleThreadExecutor();
-        Future<String> future = executor.submit(() ->
-                chatClient.chatStream(instruction, imageUrls, history));
+        AgentContextAssembler.LegacyCall call = AgentContextAssembler.toLegacyCall(context);
+        Future<String> future = executor.submit(() -> chatClient.chat(
+                call.userMessage(), imageUrls, call.history(), call.systemPrompt()));
 
         try {
             return future.get(timeoutSeconds, TimeUnit.SECONDS);
@@ -205,25 +311,49 @@ public class ChatAgent implements AgentUnit {
         return toolChatClient != null;
     }
 
-    private String chatWithTools(String instruction, List<String> imageUrls,
-                                  List<ChatRequest.Message> history) {
-        long timeoutSeconds = agentProperties != null
-                ? agentProperties.getToolCallTimeoutSeconds() : 180;
+    private String chatWithTools(String userId, String dagId,
+                                  ContextPackage context, List<String> imageUrls,
+                                  AtomicReference<UserMessageTool.PendingUserMessage> pendingRef,
+                                  AtomicReference<AgentSleepTool.PendingSleep> sleepRef,
+                                  AtomicReference<List<byte[]>> screenshotsRef,
+                                  AtomicReference<ToolLoopContextRuntime.Report> transcriptReportRef) {
+        // Hard safety cap — per-round timeout is handled by TimeoutChatModel.
+        // This only triggers if LLM enters an infinite tool loop.
+        final long HARD_CAP_SECONDS = 600;
 
         var executor = Executors.newSingleThreadExecutor();
-        Future<String> future = executor.submit(() ->
-                toolChatClient.prompt()
-                        .messages(toSpringAiMessages(instruction, imageUrls, history))
+        Future<String> future = executor.submit(() -> {
+            AutomationRuntime.setCurrentUser(userId);
+            AgentSleepTool.setCurrentDag(dagId);
+            RagTools.setCurrentUser(userId);
+            DiDiTaxiTools.setCurrentUser(userId);
+            SkillTools.setCurrentAgent(getName());
+            try {
+                String resp = toolChatClient.prompt()
+                        .messages(AgentContextAssembler.toSpringMessages(context, imageUrls))
                         .toolContext(Map.of("imageBase64Urls", imageUrls != null ? imageUrls : List.of()))
                         .call()
-                        .content());
+                        .content();
+                pendingRef.set(UserMessageTool.drain());
+                sleepRef.set(AgentSleepTool.drain());
+                screenshotsRef.set(BrowserTools.drainScreenshots());
+                return resp;
+            } finally {
+                transcriptReportRef.set(ToolLoopContextRuntime.drain());
+                SkillTools.clearCurrentAgent();
+                AutomationRuntime.clearCurrentUser();
+                AgentSleepTool.clearCurrentDag();
+                RagTools.clearCurrentUser();
+                DiDiTaxiTools.clearCurrentUser();
+            }
+        });
 
         try {
-            return future.get(timeoutSeconds, TimeUnit.SECONDS);
+            return future.get(HARD_CAP_SECONDS, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             future.cancel(true);
-            log.warn("ChatAgent tool loop timed out after {}s", timeoutSeconds);
-            throw new RuntimeException("工具调用超时（" + timeoutSeconds + "秒），可能是任务过于复杂或API服务繁忙，请简化任务后重试。");
+            log.warn("ChatAgent hard cap triggered after {}s — possible infinite tool loop", HARD_CAP_SECONDS);
+            throw new RuntimeException("工具调用超时（" + HARD_CAP_SECONDS + "秒硬限制），可能是任务过于复杂或进入循环，请简化任务后重试。");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             future.cancel(true);
@@ -240,70 +370,6 @@ public class ChatAgent implements AgentUnit {
         }
     }
 
-    private List<Message> toSpringAiMessages(String instruction, List<String> imageUrls,
-                                              List<ChatRequest.Message> history) {
-        List<Message> messages = new ArrayList<>();
-        String systemPrompt = agentProperties != null ? agentProperties.getSystemPrompt() : null;
-        if (systemPrompt != null && !systemPrompt.isBlank()) {
-            if (!skillsSummary.isEmpty()) {
-                systemPrompt = systemPrompt + "\n" + skillsSummary;
-            }
-            messages.add(new SystemMessage(systemPrompt));
-        } else if (!skillsSummary.isEmpty()) {
-            messages.add(new SystemMessage(skillsSummary));
-        }
-        if (history != null && !history.isEmpty()) {
-            for (ChatRequest.Message historyMessage : history) {
-                Message message = toSpringAiMessage(historyMessage);
-                if (message != null) {
-                    messages.add(message);
-                }
-            }
-        }
-        String text = instruction != null ? instruction : "";
-        if (imageUrls != null && !imageUrls.isEmpty()) {
-            List<Media> mediaList = new ArrayList<>();
-            for (String imageUrl : imageUrls) {
-                MimeType mimeType = detectMimeType(imageUrl);
-                mediaList.add(new Media(mimeType, URI.create(imageUrl)));
-            }
-            messages.add(UserMessage.builder().text(text).media(mediaList).build());
-        } else {
-            messages.add(new UserMessage(text));
-        }
-        return messages;
-    }
-
-    private static MimeType detectMimeType(String dataUrl) {
-        if (dataUrl.contains("image/png")) return MimeTypeUtils.IMAGE_PNG;
-        if (dataUrl.contains("image/jpg") || dataUrl.contains("image/jpeg")) return MimeTypeUtils.IMAGE_JPEG;
-        if (dataUrl.contains("image/gif")) return MimeTypeUtils.IMAGE_GIF;
-        if (dataUrl.contains("image/webp")) return MimeTypeUtils.parseMimeType("image/webp");
-        return MimeTypeUtils.IMAGE_PNG;
-    }
-
-    private static Message toSpringAiMessage(ChatRequest.Message historyMessage) {
-        if (historyMessage == null) {
-            return null;
-        }
-        String content = contentAsText(historyMessage.getContent());
-        if (content == null || content.isBlank()) {
-            return null;
-        }
-        String role = historyMessage.getRole() != null
-                ? historyMessage.getRole().toLowerCase(Locale.ROOT)
-                : "";
-        return switch (role) {
-            case "system" -> new SystemMessage(content);
-            case "assistant" -> new AssistantMessage(content);
-            default -> new UserMessage(content);
-        };
-    }
-
-    private static String contentAsText(Object content) {
-        return content == null ? null : content instanceof String text ? text : String.valueOf(content);
-    }
-
     private static List<String> stringList(Object value) {
         if (value instanceof List<?> list) {
             return list.stream()
@@ -314,13 +380,52 @@ public class ChatAgent implements AgentUnit {
         return List.of();
     }
 
-    private static List<ChatRequest.Message> historyList(Object value) {
-        if (value instanceof List<?> list) {
-            return list.stream()
-                    .filter(ChatRequest.Message.class::isInstance)
-                    .map(ChatRequest.Message.class::cast)
-                    .toList();
+    /** Build compact structured signals from the agent output for downstream context injection. */
+    private static Map<String, String> buildSignals(String response) {
+        Map<String, String> signals = new LinkedHashMap<>();
+        if (response == null || response.isBlank()) {
+            return signals;
         }
-        return List.of();
+        // Detect file output
+        if (response.contains("[FILE:") && response.contains("[/FILE]")) {
+            signals.put("has_file_output", "true");
+        }
+        // Content length bracket (compact indicator for downstream agents)
+        int len = response.length();
+        if (len < 500) {
+            signals.put("content_length", "short");
+        } else if (len < 2000) {
+            signals.put("content_length", "medium");
+        } else {
+            signals.put("content_length", "long");
+        }
+        // Check for markdown headings as content structure signal
+        if (response.contains("\n#") || response.startsWith("#")) {
+            signals.put("has_structure", "true");
+        }
+        return signals;
+    }
+
+    private String buildEffectiveSystemPrompt(String userId, String instruction,
+                                              ContextStage stage) {
+        StringBuilder sb = new StringBuilder();
+        String systemPrompt = agentProperties != null ? agentProperties.getSystemPrompt() : null;
+        if (systemPrompt != null && !systemPrompt.isBlank()) {
+            sb.append(systemPrompt);
+        }
+        if (stage == ContextStage.HEARTBEAT) {
+            if (!sb.isEmpty()) sb.append("\n\n");
+            return sb.append(HEARTBEAT_SYSTEM_PROMPT).toString();
+        }
+        if (!skillsSummary.isEmpty()) {
+            if (!sb.isEmpty()) sb.append("\n");
+            sb.append(skillsSummary);
+        }
+        return sb.toString();
+    }
+
+    private static String stringParam(Map<String, Object> params, String key) {
+        Object val = params != null ? params.get(key) : null;
+        return val instanceof String s && !s.isBlank() ? s : null;
     }
 }

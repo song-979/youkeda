@@ -8,7 +8,7 @@ public record ContextBudget(int maxContextTokens, double reservedOutputRatio) {
     }
 
     public static ContextBudget defaults() {
-        return new ContextBudget(16_000, 0.2);
+        return new ContextBudget(128_000, 0.2);
     }
 
     public int inputTokenLimit() {

@@ -11,6 +11,10 @@ src/main/resources/application.properties
 application-local.yaml
 config/application-local.yaml
 src/main/resources/application-local.yaml
+data/ilink-resume/resume-context.json
+data/ilink-resume/*.key
+data/orchestration/*.db*
+data/context/tool-transcripts/
 
 ### Local SDK copy ###
 wechat-ilink-sdk-java/
@@ -45,4 +49,3 @@ build/
 
 ### VS Code ###
 .vscode/
-

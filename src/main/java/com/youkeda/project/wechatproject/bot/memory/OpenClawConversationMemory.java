@@ -4,6 +4,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.ChatRequest;
+import com.youkeda.project.wechatproject.bot.tool.JsonExtractUtil;
+import com.youkeda.project.wechatproject.bot.tool.TokenBudgetUtil;
+import org.springframework.beans.factory.DisposableBean;
 import com.youkeda.project.wechatproject.bot.tool.TextDecodeUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,6 +17,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.LocalDate;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -27,6 +31,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -46,7 +54,7 @@ import java.util.stream.Stream;
  *
  * <p>The in-process message deque only represents the active session window. It is not durable memory.
  */
-public class OpenClawConversationMemory implements ConversationMemory {
+public class OpenClawConversationMemory implements ConversationMemory, DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(OpenClawConversationMemory.class);
 
@@ -71,9 +79,10 @@ public class OpenClawConversationMemory implements ConversationMemory {
     private static final String DAILY_COMMITMENTS = "Commitments";
     private static final String DAILY_CUSTOM = "Custom notes";
 
-    private static final int MAX_BOOTSTRAP_CHARS = 8_000;
+    private static final int MAX_BOOTSTRAP_TOKENS = 2_000;
     private static final int MAX_DAILY_NOTE_CHARS = 1_200;
     private static final int DREAM_MIN_SIGNAL_CHARS = 8;
+    private static final int DREAM_CONSOLIDATION_THRESHOLD = 5;
 
     private final int maxMessages;
     private final long ttlMillis;
@@ -86,16 +95,32 @@ public class OpenClawConversationMemory implements ConversationMemory {
     private final Map<String, SessionSlot> sessionStore = new ConcurrentHashMap<>(64);
     private final Map<String, Object> userFileLocks = new ConcurrentHashMap<>(64);
     private final Map<String, FileCacheEntry> fileCache = new ConcurrentHashMap<>(64);
+    private final Map<String, AtomicInteger> summaryCounters = new ConcurrentHashMap<>(64);
     private final ScheduledExecutorService cacheCleaner = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "openclaw-cache-cleaner");
         t.setDaemon(true);
         return t;
     });
+    private final ThreadPoolExecutor persistenceExecutor = new ThreadPoolExecutor(
+            2, 2, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(256), r -> {
+                Thread t = new Thread(r, "openclaw-memory-persist");
+                t.setDaemon(true);
+                return t;
+            }, new ThreadPoolExecutor.CallerRunsPolicy());
 
     {
         cacheCleaner.scheduleWithFixedDelay(() -> {
             long now = System.currentTimeMillis();
             fileCache.entrySet().removeIf(e -> now - e.getValue().cachedAt > 120_000);
+            sessionStore.entrySet().removeIf(entry -> {
+                boolean expired = isExpired(entry.getValue());
+                if (expired) {
+                    String key = safeFileName(entry.getKey());
+                    userFileLocks.remove(key);
+                    summaryCounters.remove(key);
+                }
+                return expired;
+            });
         }, 60, 60, TimeUnit.SECONDS);
     }
 
@@ -150,35 +175,60 @@ public class OpenClawConversationMemory implements ConversationMemory {
     public void append(String userId, String userMessage, String assistantReply) {
         appendSession(userId, "user", userMessage);
         appendSession(userId, "assistant", assistantReply);
-        cacheCleaner.execute(() -> {
-            if (aiClient != null) {
+        persistTurnAsync(userId, userMessage, assistantReply);
+    }
+
+    @Override
+    public void appendUserMessage(String userId, String userMessage) {
+        appendSession(userId, "user", userMessage);
+        persistTurnAsync(userId, userMessage, null);
+    }
+
+    @Override
+    public void clear(String userId) {
+        sessionStore.remove(userId);
+        fileCache.remove(userId + ":bootstrap");
+        userFileLocks.remove(safeFileName(userId));
+        summaryCounters.remove(safeFileName(userId));
+        log.debug("OpenClaw session window cleared for user={}", userId);
+    }
+
+    @Override
+    public void destroy() {
+        cacheCleaner.shutdownNow();
+        persistenceExecutor.shutdown();
+        try {
+            if (!persistenceExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                persistenceExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            persistenceExecutor.shutdownNow();
+        }
+    }
+
+    private void persistTurnAsync(String userId, String userMessage, String assistantReply) {
+        Runnable task = () -> {
+            if (aiClient != null && shouldSummarizeWithLlm(userId)) {
                 llmSummarizeAndPersist(userId, userMessage, assistantReply);
             } else {
                 flushDailyEvent(userId, userMessage, assistantReply);
                 captureDurableMemory(userId, userMessage, assistantReply);
                 captureDreamSignal(userId, userMessage, assistantReply);
             }
-        });
+        };
+        try {
+            persistenceExecutor.execute(task);
+        } catch (RejectedExecutionException e) {
+            log.warn("memory persistence queue rejected user={}, running inline", userId);
+            task.run();
+        }
     }
 
-    @Override
-    public void appendUserMessage(String userId, String userMessage) {
-        appendSession(userId, "user", userMessage);
-        cacheCleaner.execute(() -> {
-            if (aiClient != null) {
-                llmSummarizeAndPersist(userId, userMessage, null);
-            } else {
-                flushDailyEvent(userId, userMessage, null);
-                captureDurableMemory(userId, userMessage, null);
-                captureDreamSignal(userId, userMessage, null);
-            }
-        });
-    }
-
-    @Override
-    public void clear(String userId) {
-        sessionStore.remove(userId);
-        log.debug("OpenClaw session window cleared for user={}", userId);
+    private boolean shouldSummarizeWithLlm(String userId) {
+        int round = summaryCounters.computeIfAbsent(safeFileName(userId), key -> new AtomicInteger())
+                .incrementAndGet();
+        return round == 1 || round % 3 == 0;
     }
 
     @Override
@@ -220,87 +270,12 @@ public class OpenClawConversationMemory implements ConversationMemory {
         }
     }
 
-    private Path scratchpadFile(String userId) {
-        return basePath.resolve(".scratchpad").resolve(safeFileName(userId) + ".json");
-    }
-
-    @Override
-    public void saveScratchpad(String userId, String scratchpadJson) {
-        if (isBlank(userId) || scratchpadJson == null) {
-            return;
-        }
-        SessionSlot slot = sessionStore.computeIfAbsent(userId, key -> new SessionSlot(System.currentTimeMillis()));
-        synchronized (slot) {
-            slot.scratchpadJson = scratchpadJson;
-        }
-        // persist to file so state survives restarts
-        try {
-            Path file = scratchpadFile(userId);
-            Files.createDirectories(file.getParent());
-            Files.writeString(file, scratchpadJson, StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            log.warn("failed to persist scratchpad for userId={}: {}", userId, e.getMessage());
-        }
-    }
-
-    @Override
-    public String loadScratchpad(String userId) {
-        if (isBlank(userId)) {
-            return null;
-        }
-        // try file first (survives restarts), then fall back to in-memory
-        try {
-            Path file = scratchpadFile(userId);
-            if (Files.exists(file)) {
-                String json = Files.readString(file, StandardCharsets.UTF_8);
-                if (json != null && !json.isBlank()) {
-                    // also populate in-memory slot for subsequent saves
-                    SessionSlot slot = sessionStore.computeIfAbsent(userId,
-                            key -> new SessionSlot(System.currentTimeMillis()));
-                    synchronized (slot) {
-                        slot.scratchpadJson = json;
-                    }
-                    return json;
-                }
-            }
-        } catch (IOException e) {
-            log.warn("failed to load scratchpad file for userId={}: {}", userId, e.getMessage());
-        }
-        // fall back to in-memory
-        SessionSlot slot = sessionStore.get(userId);
-        if (slot == null || isExpired(slot)) {
-            return null;
-        }
-        synchronized (slot) {
-            return slot.scratchpadJson;
-        }
-    }
-
-    @Override
-    public void clearScratchpad(String userId) {
-        if (isBlank(userId)) {
-            return;
-        }
-        SessionSlot slot = sessionStore.get(userId);
-        if (slot != null) {
-            synchronized (slot) {
-                slot.scratchpadJson = null;
-            }
-        }
-        // remove persisted file
-        try {
-            Path file = scratchpadFile(userId);
-            Files.deleteIfExists(file);
-        } catch (IOException e) {
-            log.warn("failed to delete scratchpad file for userId={}: {}", userId, e.getMessage());
-        }
-    }
-
     // ── dreaming (public for manual/scheduled invocation) ──────
 
     /**
-     * Runs the optional OpenClaw dreaming sweep. Candidates are written to DREAMS.md for review;
-     * this method does not silently promote unreviewed observations into MEMORY.md.
+     * Runs the OpenClaw dreaming sweep. When an AI client is available, accumulated dream
+     * signals are reviewed by the LLM and confident entries are automatically promoted to
+     * MEMORY.md. Without an AI client, candidates are re-organized in DREAMS.md for manual review.
      */
     public void dream(String userId) {
         if (isBlank(userId)) {
@@ -309,15 +284,201 @@ public class OpenClawConversationMemory implements ConversationMemory {
         Object lock = userFileLock(userId);
         synchronized (lock) {
             try {
-                List<String> candidates = extractDreamCandidates(userId);
-                if (candidates.isEmpty()) {
-                    return;
+                if (aiClient != null) {
+                    consolidateDreamsWithLLM(userId);
+                } else {
+                    List<String> candidates = extractDreamCandidates(userId);
+                    if (candidates.isEmpty()) {
+                        return;
+                    }
+                    appendDreams(userId, "Dreaming sweep", candidates);
                 }
-                appendDreams(userId, "Dreaming sweep", candidates);
             } catch (IOException e) {
                 log.warn("failed to run OpenClaw dreaming sweep for user={}", userId, e);
             }
         }
+    }
+
+    /**
+     * Uses the LLM to review accumulated dream signals and promote durable ones to MEMORY.md.
+     * Remaining (non-promoted) signals stay in DREAMS.md for future review.
+     */
+    private void consolidateDreamsWithLLM(String userId) throws IOException {
+        String dreamsContent = readDreamsContext(userId);
+        if (dreamsContent.isBlank()) {
+            return;
+        }
+
+        Set<String> allSignals = new LinkedHashSet<>();
+        collectUsefulBullets(dreamsContent, allSignals);
+        if (allSignals.isEmpty()) {
+            return;
+        }
+
+        String signalsList = allSignals.stream()
+                .map(s -> "- " + s)
+                .reduce("", (a, b) -> a + "\n" + b);
+
+        String prompt = buildConsolidationPrompt(signalsList);
+        String llmResponse;
+        try {
+            llmResponse = aiClient.chat(prompt, List.of(), List.of(), MEMORY_SYSTEM_PROMPT);
+        } catch (Exception e) {
+            log.warn("LLM dream consolidation call failed for user={}, falling back", userId, e);
+            return;
+        }
+
+        List<DurableEntry> promoted = parseConsolidationResponse(llmResponse);
+        if (promoted.isEmpty()) {
+            log.debug("No dream signals promoted for user={}", userId);
+            return;
+        }
+
+        // Write promoted entries to MEMORY.md
+        Path memFile = memoryFile(userId);
+        ensureMarkdownFile(memFile, memoryHeader());
+        String memContent = Files.readString(memFile, StandardCharsets.UTF_8);
+        int promotedCount = 0;
+        for (DurableEntry entry : promoted) {
+            String cleaned = sanitizeOneLine(entry.content());
+            if (!isBlank(cleaned) && !containsBullet(memContent, cleaned)) {
+                memContent = insertBullets(memContent, entry.section(), List.of(cleaned));
+                promotedCount++;
+            }
+        }
+        if (promotedCount > 0) {
+            Files.writeString(memFile, memContent, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        }
+
+        // Remove promoted entries from DREAMS.md
+        String remaining = removePromotedFromDreams(dreamsContent, promoted);
+        Path dreamsFile = dreamsFile(userId);
+        if (remaining.isBlank() || remaining.trim().equals(dreamsHeader().trim())) {
+            // All dreams were promoted or file is effectively empty — clear it
+            Files.writeString(dreamsFile, dreamsHeader(), StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } else {
+            Files.writeString(dreamsFile, remaining, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        }
+
+        log.info("Dream consolidation: promoted {} entries to MEMORY.md for user={}", promotedCount, userId);
+    }
+
+    private String buildConsolidationPrompt(String signalsList) {
+        return """
+                Review these accumulated dream signals from previous conversations.
+                Some may represent durable user preferences, facts, or decisions worth remembering permanently.
+                Others are transient observations that should stay in the dream buffer.
+
+                Dream signals:
+                %s
+
+                Return ONLY a JSON object (no markdown, no explanation) with this format:
+
+                {
+                  "promotedMemories": [
+                    {"section": "Preferences|Projects|Decisions|Action-sensitive boundaries|Facts", "content": "concise one-line fact in Chinese"}
+                  ]
+                }
+
+                Rules:
+                - Only promote signals that represent truly durable information: user preferences, identity, recurring needs, important personal facts, or decisions.
+                - Do NOT promote one-off requests, transient observations, or conversational trivia.
+                - If multiple signals convey the same information, consolidate into a single entry.
+                - If two signals conflict, pick the more recent or more specific one.
+                - If no signals are worth promoting, return an empty array.
+                - Classify each promoted entry into the most appropriate section.
+                - Content must be in Chinese (the same language as the signals).
+                """.formatted(signalsList);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<DurableEntry> parseConsolidationResponse(String llmResponse) {
+        if (isBlank(llmResponse)) {
+            return List.of();
+        }
+        String json = extractJsonBlock(llmResponse);
+        if (json == null) {
+            log.debug("no JSON block found in consolidation response");
+            return List.of();
+        }
+        try {
+            Map<String, Object> raw = objectMapper.readValue(json,
+                    new TypeReference<Map<String, Object>>() {});
+            Object promoted = raw.get("promotedMemories");
+            if (!(promoted instanceof List<?> list)) {
+                return List.of();
+            }
+            List<DurableEntry> result = new ArrayList<>();
+            for (Object item : list) {
+                if (item instanceof Map) {
+                    Map<String, Object> m = (Map<String, Object>) item;
+                    String section = String.valueOf(m.getOrDefault("section", "Facts"));
+                    String content = String.valueOf(m.getOrDefault("content", ""));
+                    if (!content.isBlank() && !"null".equals(content)) {
+                        result.add(new DurableEntry(sanitizeSectionTitle(section), content));
+                    }
+                }
+            }
+            return result;
+        } catch (Exception e) {
+            log.debug("failed to parse consolidation response JSON: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * Removes promoted entries from the DREAMS.md content by matching against bullet text.
+     */
+    private String removePromotedFromDreams(String dreamsContent, List<DurableEntry> promoted) {
+        Set<String> promotedTexts = new LinkedHashSet<>();
+        for (DurableEntry entry : promoted) {
+            String cleaned = sanitizeOneLine(entry.content());
+            if (!cleaned.isBlank()) {
+                promotedTexts.add(cleaned);
+            }
+        }
+        if (promotedTexts.isEmpty()) {
+            return dreamsContent;
+        }
+
+        StringBuilder result = new StringBuilder();
+        for (String line : dreamsContent.split("\\R")) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("- ")) {
+                String withoutBullet = trimmed.substring(2).trim();
+                int timeSep = withoutBullet.indexOf(" - ");
+                String signalText = timeSep > 0 ? withoutBullet.substring(timeSep + 3).trim() : withoutBullet;
+                boolean shouldRemove = false;
+                for (String promotedText : promotedTexts) {
+                    if (signalText.contains(promotedText) || promotedText.contains(signalText)
+                            || sanitizeOneLine(signalText).equals(sanitizeOneLine(promotedText))) {
+                        shouldRemove = true;
+                        break;
+                    }
+                }
+                if (shouldRemove) {
+                    continue; // skip this line
+                }
+            }
+            result.append(line).append("\n");
+        }
+        return result.toString().trim();
+    }
+
+    private int countDreamBullets(String dreamsContent) {
+        if (isBlank(dreamsContent)) {
+            return 0;
+        }
+        int count = 0;
+        for (String line : dreamsContent.split("\\R")) {
+            if (line.trim().startsWith("- ")) {
+                count++;
+            }
+        }
+        return count;
     }
 
     // ── bootstrap ──────────────────────────────────────────────
@@ -334,7 +495,7 @@ public class OpenClawConversationMemory implements ConversationMemory {
                     try {
                         String retrieved = vectorIndex.retrieve(userId, query, readSourceDocuments(userId));
                         if (!retrieved.isBlank()) {
-                            return truncate(retrieved, MAX_BOOTSTRAP_CHARS);
+                            return TokenBudgetUtil.truncateAtBoundary(retrieved, MAX_BOOTSTRAP_TOKENS);
                         }
                     } catch (IOException e) {
                         log.warn("failed to retrieve OpenClaw vector memory for user={}, falling back to Markdown bootstrap",
@@ -364,13 +525,13 @@ public class OpenClawConversationMemory implements ConversationMemory {
                         MEMORY.md - durable curated memory:
                         %s
 
-                        DREAMS.md - review candidates and consolidation hints:
+                        DREAMS.md - UNREVIEWED candidates only; never treat these as established facts:
                         %s
 
                         memory/*.md - retained daily notes:
                         %s
                         """.formatted(blankToPlaceholder(memory), blankToPlaceholder(dreams), blankToPlaceholder(daily));
-                String result = truncate(context, MAX_BOOTSTRAP_CHARS);
+                String result = TokenBudgetUtil.truncateAtBoundary(context, MAX_BOOTSTRAP_TOKENS);
                 fileCache.put(cacheKey, new FileCacheEntry(result, now, currentMtimes));
                 return result;
             } catch (IOException e) {
@@ -448,7 +609,14 @@ public class OpenClawConversationMemory implements ConversationMemory {
         SessionSlot slot = sessionStore.computeIfAbsent(userId, key -> new SessionSlot(now));
         synchronized (slot) {
             slot.lastAccess = now;
-            slot.messages.addLast(new ChatRequest.Message(role, content));
+            ChatRequest.Message last = slot.messages.peekLast();
+            if (last != null && role.equals(last.getRole())) {
+                slot.messages.removeLast();
+                slot.messages.addLast(new ChatRequest.Message(role,
+                        String.valueOf(last.getContent()) + "\n" + content));
+            } else {
+                slot.messages.addLast(new ChatRequest.Message(role, content));
+            }
             while (slot.messages.size() > maxMessages) {
                 slot.messages.removeFirst();
             }
@@ -573,59 +741,8 @@ public class OpenClawConversationMemory implements ConversationMemory {
      * markdown code fences, [FILE:] tags, or other non-JSON content.
      */
     private String extractJsonBlock(String text) {
-        String trimmed = text.trim();
-
-        // 1. strip [FILE:...]...[/FILE] tags that the agent system prompt may inject
-        String stripped = trimmed.replaceAll("(?s)\\[FILE:[^]]*?\\].*?\\[/FILE\\]", "").trim();
-
-        // 2. prefer code-fenced JSON
-        for (String fence : new String[]{"```json", "```"}) {
-            int start = stripped.indexOf(fence);
-            if (start >= 0) {
-                int bodyStart = stripped.indexOf('\n', start);
-                if (bodyStart < 0) bodyStart = start + fence.length();
-                else bodyStart = bodyStart + 1;
-                int end = stripped.indexOf("```", bodyStart);
-                if (end > bodyStart) {
-                    String block = stripped.substring(bodyStart, end).trim();
-                    if (block.startsWith("{") && block.contains("dailyEvents")) {
-                        return block;
-                    }
-                }
-            }
-        }
-
-        // 3. find JSON object containing "dailyEvents" via brace matching
-        int idx = stripped.indexOf("\"dailyEvents\"");
-        if (idx < 0) {
-            idx = stripped.indexOf("\"durableMemories\"");
-        }
-        if (idx < 0) {
-            idx = stripped.indexOf("\"dreamSignals\"");
-        }
-        if (idx >= 0) {
-            int braceStart = stripped.lastIndexOf('{', idx);
-            if (braceStart >= 0) {
-                int depth = 0;
-                for (int i = braceStart; i < stripped.length(); i++) {
-                    char c = stripped.charAt(i);
-                    if (c == '{') depth++;
-                    else if (c == '}') {
-                        depth--;
-                        if (depth == 0) {
-                            return stripped.substring(braceStart, i + 1);
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4. fallback: if text starts with { and ends with }, try it
-        if (stripped.startsWith("{") && stripped.endsWith("}")) {
-            return stripped;
-        }
-
-        return null;
+        String stripped = text.replaceAll("(?s)\\[FILE:[^]]*?\\].*?\\[/FILE\\]", "").trim();
+        return JsonExtractUtil.extractJsonObject(stripped);
     }
 
     @SuppressWarnings("unchecked")
@@ -829,6 +946,16 @@ public class OpenClawConversationMemory implements ConversationMemory {
         synchronized (lock) {
             try {
                 appendDreams(userId, "Captured signal", List.of(signal));
+
+                // Auto-trigger consolidation when enough signals accumulate
+                if (aiClient != null) {
+                    String dreamsContent = readDreamsContext(userId);
+                    if (countDreamBullets(dreamsContent) >= DREAM_CONSOLIDATION_THRESHOLD) {
+                        log.info("Dream consolidation threshold ({}) reached for user={}, auto-triggering",
+                                DREAM_CONSOLIDATION_THRESHOLD, userId);
+                        consolidateDreamsWithLLM(userId);
+                    }
+                }
             } catch (IOException e) {
                 log.warn("failed to append OpenClaw DREAMS.md for user={}", userId, e);
             }
@@ -1329,7 +1456,6 @@ public class OpenClawConversationMemory implements ConversationMemory {
         final Deque<ChatRequest.Message> messages = new ArrayDeque<>();
         volatile List<String> latestImageDataUrls;
         volatile String latestImageSummary;
-        volatile String scratchpadJson;
         volatile long lastAccess;
 
         SessionSlot(long lastAccess) {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.youkeda.project.wechatproject.bot.tool.ToolService;
+import com.youkeda.project.wechatproject.bot.tool.TokenBudgetUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
@@ -36,6 +37,7 @@ public class BrowserTools implements ToolService.ProjectTool {
     private static final ThreadLocal<String> CURRENT_USER = new ThreadLocal<>();
     private static final ThreadLocal<List<byte[]>> PENDING_SCREENSHOTS =
             ThreadLocal.withInitial(ArrayList::new);
+    private static final ThreadLocal<String> TEXT_PAYLOAD = new ThreadLocal<>();
 
     /** Drain all screenshots captured by {@link #screenshot()} during this tool execution. */
     public static List<byte[]> drainScreenshots() {
@@ -58,6 +60,16 @@ public class BrowserTools implements ToolService.ProjectTool {
         CURRENT_USER.remove();
     }
 
+    public static void prepareTextPayload(String text) {
+        if (text != null && !text.isBlank()) {
+            TEXT_PAYLOAD.set(text);
+        }
+    }
+
+    public static void clearTextPayload() {
+        TEXT_PAYLOAD.remove();
+    }
+
     private String currentUserId() {
         String uid = CURRENT_USER.get();
         return uid != null ? uid : "unknown";
@@ -72,6 +84,7 @@ public class BrowserTools implements ToolService.ProjectTool {
     private final AtomicInteger restartAttempts = new AtomicInteger(0);
     private final AtomicInteger successfulCallCount = new AtomicInteger(0);
     private static final int MAX_RESTART_ATTEMPTS = 3;
+    private static final int MAX_TOOL_RESULT_TOKENS = 5_000;
 
     // Sensitive headers to redact from network responses
     private static final String[] SENSITIVE_HEADERS = {
@@ -88,7 +101,7 @@ public class BrowserTools implements ToolService.ProjectTool {
         this.properties = properties;
         this.auditLogger = auditLogger;
         log.info("BrowserTools initialized: {} tools, headless={}, maxPages={}",
-                17, properties.isHeadless(), properties.getMaxPages());
+                18, properties.isHeadless(), properties.getMaxPages());
     }
 
     // -------------------------------------------------------------------------
@@ -146,13 +159,48 @@ public class BrowserTools implements ToolService.ProjectTool {
             }
             auditLogger.logAction(userId, toolName, urlForAudit,
                     System.currentTimeMillis() - start, true, "OK");
-            return result;
+            return TokenBudgetUtil.truncateAtBoundary(result, MAX_TOOL_RESULT_TOKENS);
         } catch (Exception e) {
             auditLogger.logAction(userId, toolName, urlForAudit,
                     System.currentTimeMillis() - start, false, e.getMessage());
             auditLogger.logError(userId, toolName, urlForAudit, e);
-            throw new BrowserMcpException("TOOL_ERROR", toolName + " failed: " + e.getMessage());
+            return "Error: " + toolName + " failed: " + e.getMessage()
+                    + ". Retry with adjusted arguments or report the failure to the user.";
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Programmatic capture (not @Tool — used by BrowserAgent for verification)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Capture a screenshot directly, returning the raw PNG bytes.
+     * Used by BrowserAgent for task verification. Does NOT use PENDING_SCREENSHOTS.
+     */
+    public byte[] captureScreenshotBytes() throws IOException {
+        ensureProcessAlive();
+        ObjectNode args = MAPPER.createObjectNode();
+        JsonNode result = client.callToolRaw("take_screenshot", args);
+        JsonNode content = result.path("content");
+        if (content.isArray()) {
+            for (JsonNode item : content) {
+                JsonNode data = item.path("data");
+                if (!data.isMissingNode()) {
+                    return Base64.getDecoder().decode(data.asText());
+                }
+            }
+        }
+        throw new IOException("take_screenshot returned no image data");
+    }
+
+    /**
+     * Capture the accessibility snapshot as plain text.
+     * Used by BrowserAgent for task verification.
+     */
+    public String captureSnapshotText() throws IOException {
+        ensureProcessAlive();
+        ObjectNode args = MAPPER.createObjectNode();
+        return client.callTool("take_snapshot", args);
     }
 
     // -------------------------------------------------------------------------
@@ -369,8 +417,8 @@ public class BrowserTools implements ToolService.ProjectTool {
 
     @Tool(name = "browser_evaluate_script",
           description = "在当前页面执行JavaScript脚本并返回结果。"
-                      + "仅允许读取DOM内容的操作（如querySelector、innerText、textContent）。"
-                      + "禁止修改页面、访问localStorage/Cookie、发起网络请求。")
+                      + "高级调试工具，默认关闭。仅允许读取DOM内容的操作（如querySelector、innerText、textContent）。"
+                      + "禁止修改页面、访问localStorage/Cookie、发起网络请求。写富文本请使用browser_set_rich_text。")
     public String evaluateScript(@ToolParam(description = "要执行的JavaScript脚本（只读操作）") String script) {
         securityPolicy.validateScript(script);
 
@@ -378,6 +426,102 @@ public class BrowserTools implements ToolService.ProjectTool {
         args.put("function", script);
 
         return safeCall("evaluate_script", args, "evaluate_script");
+    }
+
+    @Tool(name = "browser_set_rich_text",
+          description = "向富文本编辑器或普通输入框写入正文。用于语雀、微信公众号、飞书等contenteditable/ProseMirror编辑器。"
+                      + "这是受控写入工具：只接收纯文本和可选CSS选择器，不允许模型执行任意JavaScript。"
+                      + "如果不知道选择器，可先不传selector，工具会自动尝试常见编辑器选择器。")
+    public String setRichText(
+            @ToolParam(description = "要写入编辑器的纯文本正文。换行会被保留。") String text,
+            @ToolParam(required = false, description = "可选CSS选择器，例如 [contenteditable=\"true\"]、.ProseMirror、[role=\"textbox\"]。") String selector) {
+        securityPolicy.validateRichTextWrite(text, selector);
+
+        ObjectNode args = MAPPER.createObjectNode();
+        args.put("function", buildSetRichTextFunction(text, selector));
+
+        return safeCall("evaluate_script", args, "set_rich_text");
+    }
+
+    @Tool(name = "browser_set_text_payload",
+          description = "将系统预置的大文本正文写入富文本编辑器或普通输入框。"
+                      + "当任务指令提到LAST_CHAT_TEXT、上一步正文、文章正文、payload正文时优先使用此工具，"
+                      + "避免把长正文复制到工具参数里。可选selector规则同browser_set_rich_text。")
+    public String setTextPayload(
+            @ToolParam(required = false, description = "可选CSS选择器，例如 [contenteditable=\"true\"]、.ProseMirror、[role=\"textbox\"]。") String selector) {
+        String text = TEXT_PAYLOAD.get();
+        if (text == null || text.isBlank()) {
+            return "NO_TEXT_PAYLOAD_AVAILABLE";
+        }
+        securityPolicy.validateRichTextWrite(text, selector);
+
+        ObjectNode args = MAPPER.createObjectNode();
+        args.put("function", buildSetRichTextFunction(text, selector));
+        return safeCall("evaluate_script", args, "set_text_payload");
+    }
+
+    private static String buildSetRichTextFunction(String text, String selector) {
+        String textJson = toJsonString(text != null ? text : "");
+        String selectorJson = selector == null || selector.isBlank() ? "null" : toJsonString(selector.trim());
+        return """
+                () => {
+                  const text = %s;
+                  const selector = %s;
+                  let selected = null;
+                  if (selector) {
+                    try {
+                      selected = document.querySelector(selector);
+                    } catch (e) {
+                      return 'INVALID_SELECTOR: ' + e.message;
+                    }
+                  }
+                  const candidates = selected
+                    ? [selected]
+                    : Array.from(document.querySelectorAll('[contenteditable="true"], .ProseMirror, [role="textbox"], textarea, input[type="text"], input:not([type])'));
+                  const editor = candidates.find(el => el && (
+                    el.isContentEditable ||
+                    el.getAttribute?.('contenteditable') === 'true' ||
+                    el.getAttribute?.('role') === 'textbox' ||
+                    el.matches?.('textarea,input')
+                  ));
+                  if (!editor) {
+                    return 'NO_EDITOR_FOUND';
+                  }
+                  editor.focus();
+                  if (editor.matches?.('textarea,input')) {
+                    editor.value = text;
+                  } else {
+                    const fragment = document.createDocumentFragment();
+                    text.split('\\n').forEach((line, index) => {
+                      if (index > 0) {
+                        fragment.appendChild(document.createElement('br'));
+                      }
+                      fragment.appendChild(document.createTextNode(line));
+                    });
+                    editor.replaceChildren(fragment);
+                  }
+                  try {
+                    editor.dispatchEvent(new InputEvent('input', {
+                      bubbles: true,
+                      composed: true,
+                      inputType: 'insertText',
+                      data: text
+                    }));
+                  } catch (e) {
+                    editor.dispatchEvent(new Event('input', { bubbles: true }));
+                  }
+                  editor.dispatchEvent(new Event('change', { bubbles: true }));
+                  return 'OK';
+                }
+                """.formatted(textJson, selectorJson);
+    }
+
+    private static String toJsonString(String value) {
+        try {
+            return MAPPER.writeValueAsString(value);
+        } catch (IOException e) {
+            throw new IllegalArgumentException("failed to encode script string", e);
+        }
     }
 
     // -------------------------------------------------------------------------

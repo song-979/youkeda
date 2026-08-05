@@ -32,16 +32,4 @@ public interface ConversationMemory {
         return getHistory(userId);
     }
 
-    /** Save a serialized TaskScratchpad for pause-resume across turns. */
-    default void saveScratchpad(String userId, String scratchpadJson) {
-    }
-
-    /** Load the saved TaskScratchpad JSON, or null if none. */
-    default String loadScratchpad(String userId) {
-        return null;
-    }
-
-    /** Clear the saved TaskScratchpad. */
-    default void clearScratchpad(String userId) {
-    }
 }

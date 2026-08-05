@@ -178,6 +178,31 @@ ContextBudget {
 - 当前 stage 的输出 schema。
 - 当前 resume / reflect 所需的活跃 scratchpad 关键状态。
 
+## Tool-loop runtime context
+
+Spring AI 在单个 Agent 内部会持续追加 `AssistantMessage(tool_calls)` 和
+`ToolResponseMessage`。这些消息必须和普通对话、DAG 节点上下文使用同一份预算，不能等到模型硬上限才停止。
+
+- 每次模型调用前都由 `ToolLoopContextManager.prepare` 重新计算完整消息的 token，包括
+  `ToolResponse.responseData` 和 tool-call arguments；不能使用 `Prompt.getContents()`，因为它不会覆盖完整工具结果。
+- 输入工作集目标仍为模型窗口的 80%，128K 模型对应约 102.4K 输入预算，余下 20% 用于输出、推理和下一次工具调用。
+- 完整工具结果在压缩前按 Agent 执行会话隔离写入
+  `data/context/tool-transcripts/<session-id>.jsonl`。子 Agent 不能读取其他会话的隐式上下文，只能持有编排显式传入的引用。
+- 工具循环第一次调用模型前，同时保存 `context-initial` 快照。当前指令、系统约束和初始任务状态仍属于工作上下文的必需层，归档快照只作为恢复兜底，不替代必需层。
+- 预算允许时最多保留最近 4 个工具响应原文。超过预算后先把更早结果压成首尾摘要和
+  `tool-transcript://<session>/<tool-call-id>` 引用；仍超预算时继续动态压缩最近结果，而不是强行保留固定数量。
+- 压缩取舍顺序固定为：旧工具结果 -> 最近工具结果 -> 历史 tool-call 大参数 -> 成对移除最早交换。当前指令、系统规则和最新任务状态不参与这条删除链。
+- 如果压缩结果不够，成对移除最早的 assistant tool-call 和 tool-response，避免产生无配对的协议消息；同时保留 session 级恢复提示。
+- 模型缺少第一步或早期证据时，先调用 `list_archived_tool_results(sessionId, query)` 搜索轻量索引，再调用
+  `read_archived_tool_result(reference, offsetToken, maxTokens)` 分页读取。单页最多 5000 token，禁止把整份历史重新装回 Prompt。
+- Agent 完成时把 `tool_transcript_session` 和 `tool_initial_context_reference` 写入
+  `AgentResult.signals`，由 DAG store 持久化并显式注入依赖节点；PAUSED 时写入 resume state。跨节点后期需要第一步证据时，因此仍能发现对应 session。
+- transcript 默认按最后写入时间保留 7 天。应用启动时检查一次，之后写入时至多每小时检查一次并删除过期 JSONL；执行中的长任务持续写入，因此不会在运行中被清理。
+- 128K 是模型声明的真实上下文上限，不应通过配置虚增。更大窗口模型可以同步提高
+  `context-window-tokens`，但逐轮压缩和持久化仍必须保留。
+
+普通长对话默认只保留最近 12 条原始消息（约 6 轮），更早消息进入滑动摘要。50 条原文在工具密集任务中会明显挤占执行结果预算，因此不再作为默认值。
+
 ## Integration
 
 ### MessageRouter

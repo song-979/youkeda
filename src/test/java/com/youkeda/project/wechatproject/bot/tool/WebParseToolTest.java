@@ -18,7 +18,8 @@ import static org.assertj.core.api.Assertions.assertThat;
         "ilink.enabled=false",
         "agent.speech.enabled=false",
         "agent.tools.webparse.enabled=true",
-        "agent.tools.webparse.api-key=test-api-key-for-validation"
+        "agent.tools.webparse.api-key=test-api-key-for-validation",
+        "agent.tools.automation.heartbeat-enabled=false"
 })
 class WebParseToolTest {
 

@@ -1,6 +1,10 @@
 package com.youkeda.project.wechatproject.bot.tool;
 
 import com.github.wechat.ilink.sdk.ILinkClient;
+import com.youkeda.project.wechatproject.bot.context.ContextEngineeringProperties;
+import com.youkeda.project.wechatproject.bot.context.FileToolTranscriptStore;
+import com.youkeda.project.wechatproject.bot.context.ToolLoopContextManager;
+import com.youkeda.project.wechatproject.bot.context.ToolTranscriptStore;
 import com.youkeda.project.wechatproject.bot.tool.browser.BrowserAuditLogger;
 import com.youkeda.project.wechatproject.bot.tool.browser.BrowserMcpClient;
 import com.youkeda.project.wechatproject.bot.tool.browser.BrowserMcpProcess;
@@ -11,6 +15,7 @@ import com.youkeda.project.wechatproject.bot.tool.chat.AutomationProperties;
 import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
 import com.youkeda.project.wechatproject.bot.tool.chat.AutomationStore;
 import com.youkeda.project.wechatproject.bot.tool.chat.AutomationTools;
+import com.youkeda.project.wechatproject.bot.tool.chat.AgentSleepTool;
 import com.youkeda.project.wechatproject.bot.tool.chat.JsonAutomationStore;
 import com.youkeda.project.wechatproject.bot.tool.chat.RecipientBindingListener;
 import com.youkeda.project.wechatproject.bot.tool.chat.ScheduledTaskExecutionResult;
@@ -28,6 +33,7 @@ import com.youkeda.project.wechatproject.bot.tool.xiaohongshutool.XiaohongshuMcp
 import com.youkeda.project.wechatproject.bot.tool.xiaohongshutool.XiaohongshuMcpProcessManager;
 import com.youkeda.project.wechatproject.bot.tool.xiaohongshutool.XiaohongshuProperties;
 import com.youkeda.project.wechatproject.bot.tool.xiaohongshutool.XiaohongshuTools;
+import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
 import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -75,42 +81,57 @@ import java.util.stream.Collectors;
 @ConditionalOnProperty(prefix = "agent.tools", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class ToolService {
 
-    /** Tool categories that belong to TravelAgent. */
-    private static final Set<String> TRAVEL_CATEGORIES = Set.of("map_navigation", "didi_taxi");
+    private static final Map<String, List<String>> DEFAULT_GROUPS = Map.of(
+            "main", List.of("information", "web_content", "automation", "local_files", "media_generation", "skill"),
+            "travel", List.of("map_navigation", "didi_taxi", "information", "skill"),
+            "browser", List.of("browser", "xiaohongshu", "information", "skill"));
 
-    /** Tool categories that belong to BrowserAgent. */
-    private static final Set<String> BROWSER_CATEGORIES = Set.of("browser");
+    private static List<String> groupCategories(ToolProperties properties, String group) {
+        Map<String, List<String>> configured = properties.getGroups();
+        return configured != null && configured.containsKey(group)
+                ? configured.get(group) : DEFAULT_GROUPS.getOrDefault(group, List.of());
+    }
+
+    private static List<ProjectTool> selectGroup(List<ProjectTool> tools, List<String> categories,
+                                                 boolean excludeWeather) {
+        Set<String> wanted = Set.copyOf(categories);
+        return tools.stream()
+                .filter(tool -> wanted.contains(tool.category()))
+                .filter(tool -> !excludeWeather || !(tool instanceof WeatherTools))
+                .toList();
+    }
 
     @Primary
     @Bean
     @ConditionalOnMissingBean
     public ToolRuntime toolRuntime(List<ProjectTool> projectTools,
-                                   ObjectProvider<RecipientBindingListener> recipientBindingListenerProvider) {
+                                   ObjectProvider<RecipientBindingListener> recipientBindingListenerProvider,
+                                   ToolProperties toolProperties) {
         recipientBindingListenerProvider.getIfAvailable();
-        List<ProjectTool> nonAgentTools = projectTools.stream()
-                .filter(t -> !TRAVEL_CATEGORIES.contains(t.category()))
-                .filter(t -> !BROWSER_CATEGORIES.contains(t.category()))
-                .filter(t -> !(t instanceof WeatherTools))
-                .toList();
-        return new ToolRuntime(nonAgentTools);
+        return new ToolRuntime(selectGroup(projectTools, groupCategories(toolProperties, "main"), true));
     }
 
     @Primary
     @Bean
     @ConditionalOnMissingBean
-    public ToolChatClientFactory toolChatClientFactory(ChatModel chatModel, ToolRuntime toolRuntime) {
-        return new ToolChatClientFactory(chatModel, toolRuntime);
+    public ToolChatClientFactory toolChatClientFactory(ChatModel chatModel, ToolRuntime toolRuntime,
+                                                        AgentProperties props,
+                                                        ContextEngineeringProperties contextProperties,
+                                                        ToolTranscriptStore transcriptStore) {
+        long perRound = props.getToolCallPerRoundTimeoutSeconds() > 0
+                ? props.getToolCallPerRoundTimeoutSeconds() : 0;
+        return new ToolChatClientFactory(chatModel, toolRuntime, perRound,
+                props.getToolCallMaxRounds(), props.getContextWindowTokens(),
+                contextProperties, transcriptStore);
     }
 
     @Bean
     @ConditionalOnMissingBean(name = "travelToolRuntime")
-    public ToolRuntime travelToolRuntime(List<ProjectTool> projectTools) {
-        List<ProjectTool> travelTools = new ArrayList<>();
+    public ToolRuntime travelToolRuntime(List<ProjectTool> projectTools, ToolProperties toolProperties) {
+        List<ProjectTool> travelTools = new ArrayList<>(
+                selectGroup(projectTools, groupCategories(toolProperties, "travel"), false));
         for (ProjectTool tool : projectTools) {
-            if (TRAVEL_CATEGORIES.contains(tool.category())
-                    || tool instanceof WeatherTools
-                    || "skill".equals(tool.category())
-                    || "information".equals(tool.category())) {
+            if (tool instanceof WeatherTools && !travelTools.contains(tool)) {
                 travelTools.add(tool);
             }
         }
@@ -120,28 +141,47 @@ public class ToolService {
     @Bean
     @ConditionalOnMissingBean(name = "travelToolChatClientFactory")
     public ToolChatClientFactory travelToolChatClientFactory(ChatModel chatModel,
-            @org.springframework.beans.factory.annotation.Qualifier("travelToolRuntime") ToolRuntime travelToolRuntime) {
-        return new ToolChatClientFactory(chatModel, travelToolRuntime);
+            @org.springframework.beans.factory.annotation.Qualifier("travelToolRuntime") ToolRuntime travelToolRuntime,
+            AgentProperties props, ContextEngineeringProperties contextProperties,
+            ToolTranscriptStore transcriptStore) {
+        long perRound = props.getToolCallPerRoundTimeoutSeconds() > 0
+                ? props.getToolCallPerRoundTimeoutSeconds() : 0;
+        return new ToolChatClientFactory(chatModel, travelToolRuntime, perRound,
+                props.getToolCallMaxRounds(), props.getContextWindowTokens(),
+                contextProperties, transcriptStore);
     }
 
     @Bean
     @ConditionalOnMissingBean(name = "browserToolRuntime")
-    public ToolRuntime browserToolRuntime(List<ProjectTool> projectTools) {
-        List<ProjectTool> browserTools = new ArrayList<>();
-        for (ProjectTool tool : projectTools) {
-            if (BROWSER_CATEGORIES.contains(tool.category()) || "skill".equals(tool.category())
-                    || "information".equals(tool.category())) {
-                browserTools.add(tool);
-            }
-        }
-        return new ToolRuntime(browserTools);
+    public ToolRuntime browserToolRuntime(List<ProjectTool> projectTools, ToolProperties toolProperties) {
+        return new ToolRuntime(selectGroup(projectTools, groupCategories(toolProperties, "browser"), false));
     }
 
     @Bean
     @ConditionalOnMissingBean(name = "browserToolChatClientFactory")
     public ToolChatClientFactory browserToolChatClientFactory(ChatModel chatModel,
-            @org.springframework.beans.factory.annotation.Qualifier("browserToolRuntime") ToolRuntime browserToolRuntime) {
-        return new ToolChatClientFactory(chatModel, browserToolRuntime);
+            @org.springframework.beans.factory.annotation.Qualifier("browserToolRuntime") ToolRuntime browserToolRuntime,
+            AgentProperties props, ContextEngineeringProperties contextProperties,
+            ToolTranscriptStore transcriptStore) {
+        long perRound = props.getToolCallPerRoundTimeoutSeconds() > 0
+                ? props.getToolCallPerRoundTimeoutSeconds() : 0;
+        return new ToolChatClientFactory(chatModel, browserToolRuntime, perRound,
+                props.getToolCallMaxRounds(), props.getContextWindowTokens(),
+                contextProperties, transcriptStore);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ToolTranscriptStore toolTranscriptStore(ContextEngineeringProperties properties) {
+        return new FileToolTranscriptStore(
+                Path.of(properties.getToolTranscriptStorePath()),
+                properties.getToolTranscriptRetentionDays());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ToolTranscriptTools toolTranscriptTools(ToolTranscriptStore transcriptStore) {
+        return new ToolTranscriptTools(transcriptStore);
     }
 
     @Bean
@@ -222,6 +262,13 @@ public class ToolService {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.tools.automation", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public AgentSleepTool agentSleepTool(AutomationRuntime automationRuntime) {
+        return new AgentSleepTool(automationRuntime);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.automation", name = "enabled", havingValue = "true", matchIfMissing = true)
     public RecipientBindingListener recipientBindingListener(AutomationStore automationStore,
                                                              ObjectProvider<MessageBridge> messageBridgeProvider) {
         return new RecipientBindingListener(automationStore, Clock.systemDefaultZone(), messageBridgeProvider);
@@ -280,7 +327,7 @@ public class ToolService {
     // 浏览器自动化工具（chrome-devtools-mcp）
     // -------------------------------------------------------------------------
 
-    @Bean
+    @Bean(destroyMethod = "stop")
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.tools.browser", name = "enabled", havingValue = "true")
     public BrowserMcpProcess browserMcpProcess(BrowserMcpProperties browserMcpProperties) throws IOException {
@@ -350,6 +397,35 @@ public class ToolService {
     }
 
     // -------------------------------------------------------------------------
+    // 小红书 MCP 工具
+    // -------------------------------------------------------------------------
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.xiaohongshu", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public XiaohongshuMcpProcessManager xiaohongshuMcpProcessManager(XiaohongshuProperties properties) {
+        return new XiaohongshuMcpProcessManager(properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.xiaohongshu", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public XiaohongshuMcpClient xiaohongshuMcpClient(XiaohongshuProperties properties) {
+        return new XiaohongshuMcpClient(properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.xiaohongshu", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public XiaohongshuTools xiaohongshuTools(XiaohongshuMcpClient xiaohongshuMcpClient,
+                                             XiaohongshuProperties properties) {
+        return new XiaohongshuTools(xiaohongshuMcpClient, properties);
+    }
+
+    // -------------------------------------------------------------------------
 
     public interface ProjectTool {
         /** 工具能力类别，用于编排模型路由决策。例如 "information", "web_content", "media_generation" */
@@ -369,7 +445,8 @@ public class ToolService {
                 "map_navigation", "高德地图（地点搜索、周边搜索、路线规划、静态地图）",
                 "didi_taxi", "滴滴打车（价格预估、叫车、订单查询、取消订单、司机位置、行程链接）",
                 "skill", "技能检索（先检索Skill获取执行指南，再调用领域工具）",
-                "browser", "浏览器自动化（网页导航、表单填写、截图、网络抓包）"
+                "browser", "浏览器自动化（网页导航、表单填写、截图、网络抓包）",
+                "xiaohongshu", "小红书（登录、搜索、笔记详情、评论、点赞、收藏、发布）"
         );
 
         private final List<ProjectTool> tools;
@@ -406,14 +483,47 @@ public class ToolService {
 
         private final ChatModel chatModel;
         private final ToolRuntime toolRuntime;
+        private final long perRoundTimeoutSeconds;
+        private final int maxRounds;
+        private final int maxContextTokens;
+        private final ContextEngineeringProperties contextProperties;
+        private final ToolTranscriptStore transcriptStore;
 
         public ToolChatClientFactory(ChatModel chatModel, ToolRuntime toolRuntime) {
+            this(chatModel, toolRuntime, 0, 20, 30000,
+                    ContextEngineeringProperties.defaults(), ToolTranscriptStore.noop());
+        }
+
+        public ToolChatClientFactory(ChatModel chatModel, ToolRuntime toolRuntime, long perRoundTimeoutSeconds) {
+            this(chatModel, toolRuntime, perRoundTimeoutSeconds, 20, 30000,
+                    ContextEngineeringProperties.defaults(), ToolTranscriptStore.noop());
+        }
+
+        public ToolChatClientFactory(ChatModel chatModel, ToolRuntime toolRuntime, long perRoundTimeoutSeconds,
+                                     int maxRounds, int maxContextTokens) {
+            this(chatModel, toolRuntime, perRoundTimeoutSeconds, maxRounds, maxContextTokens,
+                    ContextEngineeringProperties.defaults(), ToolTranscriptStore.noop());
+        }
+
+        public ToolChatClientFactory(ChatModel chatModel, ToolRuntime toolRuntime, long perRoundTimeoutSeconds,
+                                     int maxRounds, int maxContextTokens,
+                                     ContextEngineeringProperties contextProperties,
+                                     ToolTranscriptStore transcriptStore) {
             this.chatModel = chatModel;
             this.toolRuntime = toolRuntime;
+            this.perRoundTimeoutSeconds = perRoundTimeoutSeconds;
+            this.maxRounds = maxRounds;
+            this.maxContextTokens = maxContextTokens;
+            this.contextProperties = contextProperties;
+            this.transcriptStore = transcriptStore;
         }
 
         public ChatClient create() {
-            ChatClient.Builder builder = ChatClient.builder(chatModel);
+            ToolLoopContextManager contextManager = new ToolLoopContextManager(
+                    transcriptStore, maxContextTokens, contextProperties);
+            ChatModel effectiveModel = new TimeoutChatModel(chatModel, perRoundTimeoutSeconds,
+                    maxRounds, maxContextTokens, contextManager);
+            ChatClient.Builder builder = ChatClient.builder(effectiveModel);
             Object[] tools = toolRuntime.asSpringAiTools();
             return tools.length == 0 ? builder.build() : builder.defaultTools(tools).build();
         }
@@ -435,6 +545,7 @@ public class ToolService {
     @ConfigurationProperties(prefix = "agent.tools")
     public static class ToolProperties {
         private boolean enabled = true;
+        private Map<String, List<String>> groups;
 
         public boolean isEnabled() {
             return enabled;
@@ -443,5 +554,8 @@ public class ToolService {
         public void setEnabled(boolean enabled) {
             this.enabled = enabled;
         }
+
+        public Map<String, List<String>> getGroups() { return groups; }
+        public void setGroups(Map<String, List<String>> groups) { this.groups = groups; }
     }
 }

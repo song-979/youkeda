@@ -30,9 +30,11 @@ public class ImageGenAgent implements AgentUnit {
     public AgentCapability getCapability() {
         return new AgentCapability(
                 "image-generation",
-                "Generates images from descriptive prompts.",
+                "Generates images from descriptive prompts. Only for generating NEW static images, not GIFs or animated content.",
                 List.of("text-to-image", "illustration", "visual design"),
-                "image"
+                "image",
+                List.of("生成图片", "画一张", "画个", "文生图", "帮我画", "生成一张"),
+                true
         );
     }
 

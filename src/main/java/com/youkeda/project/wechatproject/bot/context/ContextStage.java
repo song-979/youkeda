@@ -4,5 +4,7 @@ public enum ContextStage {
     PLAN,
     REFLECT,
     RESUME,
-    SCHEDULED
+    SCHEDULED,
+    HEARTBEAT,
+    EXECUTE
 }

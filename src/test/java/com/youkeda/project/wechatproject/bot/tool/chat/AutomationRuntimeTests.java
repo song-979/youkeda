@@ -6,6 +6,7 @@ import com.youkeda.project.wechatproject.bot.tool.travel.*;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -188,6 +189,43 @@ class AutomationRuntimeTests {
     }
 
     @Test
+    void reminderIsOwnedAndDispatchedToItsCreatingUser() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderDispatcher dispatcher = new RecordingReminderDispatcher();
+        AutomationRuntime runtime = newRuntime(store, new RecordingReminderScheduler(), dispatcher);
+        AutomationRuntime.setCurrentUser("owner-a@im.wechat");
+        AutomationRuntime.ReminderResult created;
+        try {
+            created = runtime.createReminder("private", "2026-07-22T20:00:00+08:00", "private message");
+        } finally {
+            AutomationRuntime.clearCurrentUser();
+        }
+
+        runtime.triggerReminder(created.reminder().id());
+
+        assertThat(created.reminder().ownerId()).isEqualTo("owner-a@im.wechat");
+        assertThat(dispatcher.recipientIds).containsExactly("owner-a@im.wechat");
+    }
+
+    @Test
+    void ownerlessLegacyReminderDoesNotUseMutableLastUserBinding() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderDispatcher dispatcher = new RecordingReminderDispatcher();
+        Instant now = FIXED_CLOCK.instant();
+        store.saveRecipientBinding(new AutomationStore.RecipientBinding("other-user@im.wechat", now, now));
+        store.saveReminder(new AutomationStore.Reminder("legacy", "legacy", now, "private legacy message",
+                AutomationStore.ReminderStatus.PENDING, now, now, null, 0));
+        AutomationRuntime runtime = new AutomationRuntime(store, new RecordingReminderScheduler(), dispatcher,
+                new AutomationProperties(), FIXED_CLOCK);
+
+        runtime.triggerReminder("legacy");
+
+        assertThat(dispatcher.recipientIds).isEmpty();
+        assertThat(store.findReminder("legacy")).map(AutomationStore.Reminder::status)
+                .contains(AutomationStore.ReminderStatus.FAILED);
+    }
+
+    @Test
     void dailyRecurringReminderCreatesNextPendingReminderAndAdvancesAfterTrigger() {
         RecordingReminderScheduler scheduler = new RecordingReminderScheduler();
         RecordingReminderDispatcher dispatcher = new RecordingReminderDispatcher();
@@ -242,11 +280,133 @@ class AutomationRuntimeTests {
         assertThat(cron.task().nextRunAt()).isEqualTo(Instant.parse("2026-07-23T02:15:00Z"));
     }
 
+    @Test
+    void userActivityCreatesOnlyOneDefaultHeartbeat() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderScheduler scheduler = new RecordingReminderScheduler();
+        AutomationProperties properties = new AutomationProperties();
+        AutomationRuntime runtime = new AutomationRuntime(
+                store, scheduler, new RecordingReminderDispatcher(), properties, FIXED_CLOCK);
+
+        runtime.markUserActivity("user-a@im.wechat");
+        runtime.markUserActivity("user-a@im.wechat");
+
+        assertThat(store.listReminders(AutomationStore.ReminderStatus.PENDING))
+                .singleElement()
+                .satisfies(heartbeat -> {
+                    assertThat(heartbeat.taskKind())
+                            .isEqualTo(AutomationStore.AutomationTaskKind.AGENT_HEARTBEAT);
+                    assertThat(heartbeat.ownerId()).isEqualTo("user-a@im.wechat");
+                    assertThat(heartbeat.remindAt())
+                            .isEqualTo(FIXED_CLOCK.instant().plusSeconds(60 * 60));
+                });
+    }
+
+    @Test
+    void agentWakeTimeOverridesDefaultAndWatchdogDoesNotWakeEarly() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderScheduler scheduler = new RecordingReminderScheduler();
+        List<ScheduledTaskExecutionRequest> executions = new ArrayList<>();
+        AutomationRuntime runtime = new AutomationRuntime(
+                store, scheduler, new RecordingReminderDispatcher(),
+                new AutomationProperties(), FIXED_CLOCK, null, request -> {
+                    executions.add(request);
+                    return ScheduledTaskExecutionResult.reschedule(
+                            FIXED_CLOCK.instant().plusSeconds(60 * 60), null);
+                });
+        runtime.markUserActivity("user-a@im.wechat");
+
+        AutomationRuntime.HeartbeatResult result = runtime.scheduleAgentWake(
+                "user-a@im.wechat", "2026-07-22T15:00:00+08:00", "wait three hours");
+        runtime.runHeartbeatWatchdog();
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.nextWakeAt()).isEqualTo(Instant.parse("2026-07-22T07:00:00Z"));
+        assertThat(executions).isEmpty();
+        assertThat(runtime.findAgentHeartbeat("user-a@im.wechat"))
+                .get()
+                .extracting(AutomationStore.Reminder::message)
+                .isEqualTo("wait three hours");
+    }
+
+    @Test
+    void userActivityPullsFarAgentWakeForwardAndDebouncesFromLatestMessage() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderScheduler scheduler = new RecordingReminderScheduler();
+        AutomationProperties properties = new AutomationProperties();
+        MutableClock clock = new MutableClock(FIXED_CLOCK.instant(), FIXED_CLOCK.getZone());
+        AutomationRuntime runtime = new AutomationRuntime(
+                store, scheduler, new RecordingReminderDispatcher(), properties, clock);
+        runtime.scheduleAgentWake(
+                "user-a@im.wechat", "2026-07-22T15:00:00+08:00", "wait three hours");
+
+        clock.advance(Duration.ofMinutes(10));
+        runtime.markUserActivity("user-a@im.wechat");
+        AutomationStore.Reminder firstRebase = runtime.findAgentHeartbeat("user-a@im.wechat").orElseThrow();
+        assertThat(firstRebase.remindAt()).isEqualTo(Instant.parse("2026-07-22T05:10:00Z"));
+        assertThat(firstRebase.actionTarget()).isEqualTo("USER_ACTIVITY");
+
+        clock.advance(Duration.ofMinutes(30));
+        runtime.markUserActivity("user-a@im.wechat");
+        AutomationStore.Reminder secondRebase = runtime.findAgentHeartbeat("user-a@im.wechat").orElseThrow();
+        assertThat(secondRebase.id()).isEqualTo(firstRebase.id());
+        assertThat(secondRebase.remindAt()).isEqualTo(Instant.parse("2026-07-22T05:40:00Z"));
+        assertThat(store.listReminders(null)).hasSize(1);
+    }
+
+    @Test
+    void userActivityKeepsAnEarlierAgentSelectedWake() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderScheduler scheduler = new RecordingReminderScheduler();
+        AutomationProperties properties = new AutomationProperties();
+        MutableClock clock = new MutableClock(FIXED_CLOCK.instant(), FIXED_CLOCK.getZone());
+        AutomationRuntime runtime = new AutomationRuntime(
+                store, scheduler, new RecordingReminderDispatcher(), properties, clock);
+        runtime.scheduleAgentWake(
+                "user-a@im.wechat", "2026-07-22T12:30:00+08:00", "check a time-sensitive result");
+
+        clock.advance(Duration.ofMinutes(5));
+        runtime.markUserActivity("user-a@im.wechat");
+
+        assertThat(runtime.findAgentHeartbeat("user-a@im.wechat"))
+                .get()
+                .satisfies(heartbeat -> {
+                    assertThat(heartbeat.remindAt()).isEqualTo(Instant.parse("2026-07-22T04:30:00Z"));
+                    assertThat(heartbeat.actionTarget()).isEqualTo("AGENT");
+                });
+    }
+
+    @Test
+    void sharedWakeCanOnlyMoveAnExistingHeartbeatEarlier() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderScheduler scheduler = new RecordingReminderScheduler();
+        AutomationRuntime runtime = new AutomationRuntime(
+                store, scheduler, new RecordingReminderDispatcher(),
+                new AutomationProperties(), FIXED_CLOCK);
+        runtime.scheduleAgentWake(
+                "user-a@im.wechat", "2026-07-22T12:30:00+08:00", "earlier agent wake");
+
+        runtime.scheduleWakeNoLaterThan(
+                "user-a@im.wechat", Instant.parse("2026-07-22T06:00:00Z"), "later DAG retry");
+        assertThat(runtime.findAgentHeartbeat("user-a@im.wechat"))
+                .get()
+                .extracting(AutomationStore.Reminder::remindAt)
+                .isEqualTo(Instant.parse("2026-07-22T04:30:00Z"));
+
+        runtime.scheduleWakeNoLaterThan(
+                "user-a@im.wechat", Instant.parse("2026-07-22T04:20:00Z"), "earlier DAG retry");
+        assertThat(runtime.findAgentHeartbeat("user-a@im.wechat"))
+                .get()
+                .extracting(AutomationStore.Reminder::remindAt)
+                .isEqualTo(Instant.parse("2026-07-22T04:20:00Z"));
+    }
+
     private static AutomationRuntime newRuntime(InMemoryAutomationStore store,
                                                 RecordingReminderScheduler scheduler,
                                                 RecordingReminderDispatcher dispatcher) {
         AutomationProperties properties = new AutomationProperties();
         properties.setDefaultRecipientId("bound-user@im.wechat");
+        properties.setHeartbeatEnabled(false);
         return new AutomationRuntime(store, scheduler, dispatcher, properties, FIXED_CLOCK);
     }
 
@@ -361,6 +521,35 @@ class AutomationRuntimeTests {
 
         private ScheduleItemStatus effectiveStatus(ScheduleItem item) {
             return item.status() != null ? item.status() : ScheduleItemStatus.ACTIVE;
+        }
+    }
+
+    private static final class MutableClock extends Clock {
+        private Instant current;
+        private final ZoneId zoneId;
+
+        private MutableClock(Instant current, ZoneId zoneId) {
+            this.current = current;
+            this.zoneId = zoneId;
+        }
+
+        private void advance(Duration duration) {
+            current = current.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return zoneId;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return new MutableClock(current, zone);
+        }
+
+        @Override
+        public Instant instant() {
+            return current;
         }
     }
 }

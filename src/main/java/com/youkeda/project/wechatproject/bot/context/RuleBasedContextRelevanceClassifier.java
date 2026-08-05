@@ -1,7 +1,5 @@
 package com.youkeda.project.wechatproject.bot.context;
 
-import com.youkeda.project.wechatproject.bot.orchestrator.TaskScratchpad;
-
 import java.util.Locale;
 
 public class RuleBasedContextRelevanceClassifier implements ContextRelevanceClassifier {
@@ -12,14 +10,19 @@ public class RuleBasedContextRelevanceClassifier implements ContextRelevanceClas
             return ContextRelevance.NEW_TOPIC;
         }
 
-        TaskScratchpad scratchpad = request.scratchpad();
-        if (request.stage() == ContextStage.RESUME
-                || (scratchpad != null && !scratchpad.isEmpty())) {
-            return ContextRelevance.RESUME_TASK;
+        ContextTaskState taskState = request.taskState();
+        if (taskState != null && !taskState.isEmpty()
+                && (request.stage() == ContextStage.REFLECT
+                || request.stage() == ContextStage.EXECUTE
+                || request.audience() == ContextAudience.SUB_AGENT)) {
+            return ContextRelevance.TOOL_DEPENDENT;
         }
 
         String text = normalize(request.currentMessage());
         if (text.isBlank()) {
+            if (taskState != null && !taskState.isEmpty()) {
+                return ContextRelevance.RELATED;
+            }
             return request.recentHistory().isEmpty()
                     ? ContextRelevance.NEW_TOPIC
                     : ContextRelevance.RELATED;
@@ -32,10 +35,17 @@ public class RuleBasedContextRelevanceClassifier implements ContextRelevanceClas
 
         if (containsAny(text, "继续", "接着", "按刚才", "按你说", "照刚才", "上一轮", "上面那个",
                 "刚才那个", "这个方案", "这个设计", "前面说的", "继续做")) {
-            return ContextRelevance.CONTINUATION;
+            return taskState != null && !taskState.isEmpty()
+                    ? ContextRelevance.RESUME_TASK : ContextRelevance.CONTINUATION;
         }
 
         if (!request.recentHistory().isEmpty() && containsAny(text, "这个", "那个", "它", "这件事", "刚刚")) {
+            return ContextRelevance.RELATED;
+        }
+
+        if (taskState != null && !taskState.isEmpty()
+                && (request.stage() == ContextStage.RESUME
+                || "WAITING_USER".equalsIgnoreCase(taskState.dagStatus()))) {
             return ContextRelevance.RELATED;
         }
 

@@ -27,14 +27,14 @@ public class SkillTools implements ToolService.ProjectTool {
 
     private static final ThreadLocal<String> CURRENT_AGENT = new ThreadLocal<>();
 
-    /** Set by MessageRouter before each agent execution. */
+    /** Set by the routing layer before each agent execution. */
     public static void setCurrentAgent(String agent) {
         if (agent != null && !agent.isBlank()) {
             CURRENT_AGENT.set(agent.toUpperCase());
         }
     }
 
-    /** Clear by MessageRouter after each agent execution. */
+    /** Clear by the routing layer after each agent execution. */
     public static void clearCurrentAgent() {
         CURRENT_AGENT.remove();
     }
@@ -58,37 +58,12 @@ public class SkillTools implements ToolService.ProjectTool {
         }
         String upper = agent.toUpperCase();
         List<SkillDef> filtered = skills.stream()
-                .filter(s -> upper.equals(s.agent))
+                .filter(s -> upper.equals(s.agent) || s.agent.isEmpty())
                 .toList();
         if (filtered.isEmpty()) {
             return "";
         }
         return buildSummary(filtered);
-    }
-
-    /**
-     * Returns the full SKILL.md body for all skills matching the agent.
-     * Used by agents that don't have the search_skills tool (BROWSER, TRAVEL).
-     */
-    public String getSkillsInlineBody(String agent) {
-        if (skills.isEmpty() || agent == null || agent.isBlank()) {
-            return "";
-        }
-        String upper = agent.toUpperCase();
-        List<SkillDef> filtered = skills.stream()
-                .filter(s -> upper.equals(s.agent))
-                .toList();
-        if (filtered.isEmpty()) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder();
-        sb.append("\n## 必须遵守的技能指令（Skills）\n\n");
-        for (SkillDef skill : filtered) {
-            sb.append("### ").append(skill.name).append("\n");
-            sb.append(skill.body).append("\n\n---\n\n");
-        }
-        sb.append("请严格按照上述技能指令执行所有操作。\n");
-        return sb.toString();
     }
 
     @Tool(name = "search_skills",
@@ -148,7 +123,7 @@ public class SkillTools implements ToolService.ProjectTool {
         }
         String upper = agent.toUpperCase();
         return skills.stream()
-                .filter(s -> upper.equals(s.agent))
+                .filter(s -> upper.equals(s.agent) || s.agent.isEmpty())
                 .toList();
     }
 
@@ -221,6 +196,10 @@ public class SkillTools implements ToolService.ProjectTool {
         if (name.isEmpty() || description.isEmpty()) {
             log.warn("skill file {} missing name or description, skipping", file);
             return null;
+        }
+
+        if (agent.isEmpty()) {
+            log.warn("skill '{}' has no agent field, will be available to all agents as a global skill", name);
         }
 
         return new SkillDef(name, agent, description, priority, body);

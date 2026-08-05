@@ -9,6 +9,7 @@ import org.springframework.scheduling.support.CronExpression;
 
 import java.time.Clock;
 import java.time.DayOfWeek;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -21,13 +22,19 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Objects;
 import java.util.UUID;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledFuture;
 
 public class AutomationRuntime implements InitializingBean {
 
     private static final Logger log = LoggerFactory.getLogger(AutomationRuntime.class);
+    private static final ThreadLocal<String> CURRENT_USER = new ThreadLocal<>();
+    private static final String HEARTBEAT_SOURCE_DEFAULT = "DEFAULT";
+    private static final String HEARTBEAT_SOURCE_AGENT = "AGENT";
+    private static final String HEARTBEAT_SOURCE_USER_ACTIVITY = "USER_ACTIVITY";
 
     private final AutomationStore store;
     private final ReminderScheduler scheduler;
@@ -37,6 +44,23 @@ public class AutomationRuntime implements InitializingBean {
     private final ZoneId zoneId;
     private final WeatherTools weatherTools;
     private final ScheduledTaskExecutor scheduledTaskExecutor;
+    private final Set<String> knownHeartbeatUsers = ConcurrentHashMap.newKeySet();
+
+    public static void setCurrentUser(String userId) {
+        if (userId == null || userId.isBlank()) {
+            CURRENT_USER.remove();
+        } else {
+            CURRENT_USER.set(userId);
+        }
+    }
+
+    public static void clearCurrentUser() {
+        CURRENT_USER.remove();
+    }
+
+    static String currentUserId() {
+        return CURRENT_USER.get();
+    }
 
     public AutomationRuntime(AutomationStore store,
                              ReminderScheduler scheduler,
@@ -74,8 +98,81 @@ public class AutomationRuntime implements InitializingBean {
 
     @Override
     public void afterPropertiesSet() {
+        recoverTriggeringReminders();
         reschedulePendingReminders();
         scheduleRecurringTasks();
+        if (properties.isHeartbeatEnabled()) {
+            seedConfiguredHeartbeatUser();
+            scheduler.scheduleWatchdog(
+                    Duration.ofMinutes(Math.max(1, properties.getHeartbeatWatchdogMinutes())),
+                    this::runHeartbeatWatchdog);
+        }
+    }
+
+    public void markUserActivity(String userId) {
+        if (!properties.isHeartbeatEnabled() || userId == null || userId.isBlank()) {
+            return;
+        }
+        String normalized = userId.trim();
+        knownHeartbeatUsers.add(normalized);
+        rebaseHeartbeatAfterUserActivity(normalized);
+    }
+
+    public HeartbeatResult scheduleAgentWake(String userId, String wakeAtText, String reason) {
+        if (!properties.isHeartbeatEnabled()) {
+            return HeartbeatResult.failure("agent heartbeat is disabled");
+        }
+        if (userId == null || userId.isBlank()) {
+            return HeartbeatResult.failure("user id is required");
+        }
+        Instant requested;
+        try {
+            requested = parseInstant(wakeAtText);
+        } catch (DateTimeParseException | IllegalArgumentException e) {
+            return HeartbeatResult.failure("wakeAt must be an ISO datetime with timezone");
+        }
+        String normalizedUser = userId.trim();
+        knownHeartbeatUsers.add(normalizedUser);
+        Instant wakeAt = clampHeartbeatWakeAt(requested);
+        AutomationStore.Reminder heartbeat = upsertHeartbeat(
+                normalizedUser, wakeAt, HEARTBEAT_SOURCE_AGENT,
+                normalizeOptional(reason, "agent selected wake time"), true);
+        log.info("[HEARTBEAT] agent wake scheduled userId={} heartbeatId={} nextWakeAt={} reason={}",
+                normalizedUser, heartbeat.id(), heartbeat.remindAt(),
+                normalizeOptional(reason, "agent selected wake time"));
+        return HeartbeatResult.success(heartbeat.remindAt(), heartbeat.id());
+    }
+
+    public HeartbeatResult scheduleWakeNoLaterThan(String userId, Instant requested, String reason) {
+        if (!properties.isHeartbeatEnabled()) {
+            return HeartbeatResult.failure("agent heartbeat is disabled");
+        }
+        if (userId == null || userId.isBlank() || requested == null) {
+            return HeartbeatResult.failure("user id and wake time are required");
+        }
+        String normalizedUser = userId.trim();
+        knownHeartbeatUsers.add(normalizedUser);
+        Instant wakeAt = clampHeartbeatWakeAt(requested);
+        AutomationStore.Reminder heartbeat = upsertHeartbeat(
+                normalizedUser, wakeAt, HEARTBEAT_SOURCE_AGENT,
+                normalizeOptional(reason, "system requested earlier agent wake"), false);
+        log.info("[HEARTBEAT] shared wake bounded userId={} heartbeatId={} requestedAt={} "
+                        + "nextWakeAt={} reason={}",
+                normalizedUser, heartbeat.id(), wakeAt, heartbeat.remindAt(),
+                normalizeOptional(reason, "system requested earlier agent wake"));
+        return HeartbeatResult.success(heartbeat.remindAt(), heartbeat.id());
+    }
+
+    public Optional<AutomationStore.Reminder> findAgentHeartbeat(String userId) {
+        return activeHeartbeatFor(userId);
+    }
+
+    private void recoverTriggeringReminders() {
+        Instant now = clock.instant();
+        for (AutomationStore.Reminder reminder : store.listReminders(AutomationStore.ReminderStatus.TRIGGERING)) {
+            store.transitionReminderStatus(reminder.id(), AutomationStore.ReminderStatus.TRIGGERING,
+                    AutomationStore.ReminderStatus.PENDING, now);
+        }
     }
 
     public ReminderResult createReminder(String title, String remindAtText, String message) {
@@ -96,7 +193,7 @@ public class AutomationRuntime implements InitializingBean {
         if (!remindAt.isAfter(now)) {
             return ReminderResult.failure("remindAt must be in the future");
         }
-        if (resolveRecipientId() == null) {
+        if (resolveRecipientIdForOwner(currentUserId()) == null) {
             return ReminderResult.failure("reminder recipient is not bound yet");
         }
 
@@ -117,9 +214,10 @@ public class AutomationRuntime implements InitializingBean {
                 0,
                 AutomationStore.AutomationActionType.TEXT,
                 null,
-                null);
+                null)
+                .withOwnerId(currentUserId());
         store.saveReminder(reminder);
-        scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+        scheduleReminder(reminder);
         log.info("TEXT_REMINDER created successfully: id={}, title={}, remindAt={}",
                 reminder.id(), title, remindAt);
         return ReminderResult.success(reminder, "reminder created");
@@ -224,10 +322,11 @@ public class AutomationRuntime implements InitializingBean {
                 reminder.sendAttempts(),
                 effectiveActionType(reminder),
                 reminder.actionTarget(),
-                reminder.recurringTaskId());
+                reminder.recurringTaskId())
+                .withOwnerId(reminder.ownerId());
         store.saveReminder(updated);
         scheduler.cancel(updated.id());
-        scheduler.schedule(updated, () -> triggerReminder(updated.id()));
+        scheduleReminder(updated);
         return ReminderResult.success(updated, "reminder updated");
     }
 
@@ -278,10 +377,11 @@ public class AutomationRuntime implements InitializingBean {
                 normalizeOptional(instruction, reminder.instruction()),
                 normalizeOptional(originalRequest, reminder.originalRequest()),
                 expectedToolCategories != null ? expectedToolCategories : reminder.expectedToolCategories(),
-                effectiveMaxRetries(reminder));
+                effectiveMaxRetries(reminder),
+                reminder.ownerId());
         store.saveReminder(updated);
         scheduler.cancel(updated.id());
-        scheduler.schedule(updated, () -> triggerReminder(updated.id()));
+        scheduleReminder(updated);
         return ReminderResult.success(updated, "llm task updated");
     }
 
@@ -333,8 +433,14 @@ public class AutomationRuntime implements InitializingBean {
         if (!remindAt.isAfter(now)) {
             return ReminderResult.failure("remindAt must be in the future");
         }
-        if (resolveRecipientId() == null) {
+        if (resolveRecipientIdForOwner(currentUserId()) == null) {
             return ReminderResult.failure("reminder recipient is not bound yet");
+        }
+
+        Optional<AutomationStore.Reminder> duplicate = findRecentDuplicate(
+                normalizedTitle, remindAt, normalizedMessage, now);
+        if (duplicate.isPresent()) {
+            return ReminderResult.success(duplicate.get(), "duplicate reminder already exists");
         }
 
         AutomationStore.Reminder reminder = new AutomationStore.Reminder(
@@ -354,9 +460,10 @@ public class AutomationRuntime implements InitializingBean {
                 instruction,
                 originalRequest,
                 expectedToolCategories,
-                maxRetries);
+                maxRetries)
+                .withOwnerId(currentUserId());
         store.saveReminder(reminder);
-        scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+        scheduleReminder(reminder);
         String kindLabel = taskKind == AutomationStore.AutomationTaskKind.LLM_TASK ? "LLM_TASK" : "TEXT_REMINDER";
         log.info("{} created successfully: id={}, title={}, remindAt={}",
                 kindLabel, reminder.id(), title, remindAt);
@@ -564,7 +671,7 @@ public class AutomationRuntime implements InitializingBean {
         if (normalizedExpression == null) {
             return RecurringTaskResult.failure("scheduleExpression is required");
         }
-        if (resolveRecipientId() == null) {
+        if (resolveRecipientIdForOwner(currentUserId()) == null) {
             return RecurringTaskResult.failure("reminder recipient is not bound yet");
         }
 
@@ -593,7 +700,8 @@ public class AutomationRuntime implements InitializingBean {
                 instruction,
                 originalRequest,
                 expectedToolCategories,
-                maxRetries);
+                maxRetries)
+                .withOwnerId(currentUserId());
         store.saveRecurringTask(task);
         scheduleRecurringInstance(task);
         return RecurringTaskResult.success(task,
@@ -627,23 +735,20 @@ public class AutomationRuntime implements InitializingBean {
     }
 
     void triggerReminder(String reminderId) {
-        Optional<AutomationStore.Reminder> existing = store.findReminder(reminderId);
-        if (existing.isEmpty()) {
+        Optional<AutomationStore.Reminder> claimed = store.transitionReminderStatus(
+                reminderId, AutomationStore.ReminderStatus.PENDING,
+                AutomationStore.ReminderStatus.TRIGGERING, clock.instant());
+        if (claimed.isEmpty()) {
             return;
         }
-        AutomationStore.Reminder reminder = existing.get();
-        if (reminder.status() != AutomationStore.ReminderStatus.PENDING) {
-            return;
+        AutomationStore.Reminder triggering = claimed.get();
+        if (isHeartbeat(triggering)) {
+            log.info("[HEARTBEAT] wake claimed heartbeatId={} userId={} scheduledFor={} source={}",
+                    triggering.id(), triggering.ownerId(), triggering.remindAt(),
+                    triggering.actionTarget());
         }
 
-        AutomationStore.Reminder triggering = copyReminder(
-                reminder,
-                AutomationStore.ReminderStatus.TRIGGERING,
-                null,
-                reminder.sendAttempts());
-        store.saveReminder(triggering);
-
-        String recipientId = resolveRecipientId();
+        String recipientId = resolveRecipientIdForOwner(triggering.ownerId());
         if (recipientId == null) {
             store.saveReminder(copyReminder(
                     triggering,
@@ -653,7 +758,8 @@ public class AutomationRuntime implements InitializingBean {
             return;
         }
 
-        if (effectiveTaskKind(triggering) == AutomationStore.AutomationTaskKind.LLM_TASK) {
+        if (effectiveTaskKind(triggering) == AutomationStore.AutomationTaskKind.LLM_TASK
+                || effectiveTaskKind(triggering) == AutomationStore.AutomationTaskKind.AGENT_HEARTBEAT) {
             triggerLlmTask(triggering, recipientId);
             return;
         }
@@ -745,12 +851,58 @@ public class AutomationRuntime implements InitializingBean {
                         recipientId,
                         reminder.title(),
                         instruction,
-                        reminder.originalRequest(),
+                        isHeartbeat(reminder) ? reminder.message() : reminder.originalRequest(),
                         reminder.expectedToolCategories(),
                         reminder.remindAt(),
-                        reminder.recurringTaskId() != null && !reminder.recurringTaskId().isBlank()));
+                        reminder.recurringTaskId() != null && !reminder.recurringTaskId().isBlank(),
+                        effectiveTaskKind(reminder)));
                 if (result != null && result.success()) {
+                    if (isHeartbeat(reminder) && result.nextWakeAt() != null) {
+                        AutomationStore.Reminder latest = store.findReminder(reminder.id())
+                                .orElse(reminder);
+                        boolean concurrentAgentWake = latest.status() == AutomationStore.ReminderStatus.TRIGGERING
+                                && (!latest.remindAt().equals(reminder.remindAt())
+                                || !Objects.equals(latest.message(), reminder.message()));
+                        Instant nextWakeAt = concurrentAgentWake
+                                ? latest.remindAt() : clampHeartbeatWakeAt(result.nextWakeAt());
+                        String nextWakeNote = concurrentAgentWake
+                                ? latest.message()
+                                : normalizeOptional(result.nextWakeNote(), reminder.message());
+                        String nextWakeSource = concurrentAgentWake
+                                ? latest.actionTarget() : HEARTBEAT_SOURCE_AGENT;
+                        AutomationStore.Reminder pending = heartbeatCopy(
+                                latest,
+                                nextWakeAt,
+                                AutomationStore.ReminderStatus.PENDING,
+                                nextWakeNote,
+                                nextWakeSource,
+                                null);
+                        store.saveReminder(pending);
+                        scheduleReminder(pending);
+                        log.info("[HEARTBEAT] decision persisted heartbeatId={} userId={} "
+                                        + "nextWakeAt={} proactive={} note={}",
+                                pending.id(), pending.ownerId(), pending.remindAt(),
+                                result.message() != null && !result.message().isBlank(),
+                                pending.message());
+                        String proactiveMessage = normalizeRequired(result.message(), "message");
+                        if (proactiveMessage != null && !result.alreadyDispatched()) {
+                            try {
+                                dispatcher.send(recipientId, proactiveMessage);
+                                log.info("[HEARTBEAT] proactive message dispatched heartbeatId={} userId={}",
+                                        reminder.id(), recipientId);
+                            } catch (Exception sendError) {
+                                log.warn("heartbeat proactive message could not be delivered: id={}, error={}",
+                                        reminder.id(), sendError.getMessage());
+                            }
+                        }
+                        return;
+                    }
                     String message = normalizeOptional(result.message(), "scheduled task completed");
+                    if (result.alreadyDispatched()) {
+                        store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.SENT, null, i));
+                        advanceRecurringTaskIfNeeded(reminder);
+                        return;
+                    }
                     try {
                         dispatcher.send(recipientId, message);
                         store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.SENT, null, i));
@@ -779,7 +931,19 @@ public class AutomationRuntime implements InitializingBean {
             }
         }
 
-        if (isContextTokenErrorFromMessage(lastError)) {
+        if (isHeartbeat(reminder)) {
+            AutomationStore.Reminder fallback = heartbeatCopy(
+                    reminder,
+                    fallbackHeartbeatWakeAt(),
+                    AutomationStore.ReminderStatus.PENDING,
+                    reminder.message(),
+                    HEARTBEAT_SOURCE_DEFAULT,
+                    lastError);
+            store.saveReminder(fallback);
+            scheduleReminder(fallback);
+            log.warn("[HEARTBEAT] execution failed heartbeatId={} fallbackWakeAt={} error={}",
+                    reminder.id(), fallback.remindAt(), lastError);
+        } else if (isContextTokenErrorFromMessage(lastError)) {
             store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.PENDING,
                     "waiting for context refresh: " + lastError, 0));
             log.info("LLM_TASK {} kept PENDING, will retry on next user message", reminder.id());
@@ -807,6 +971,14 @@ public class AutomationRuntime implements InitializingBean {
         String reason = failureMessage != null && !failureMessage.isBlank()
                 ? failureMessage
                 : "scheduled task failed";
+        if (isHeartbeat(reminder)) {
+            AutomationStore.Reminder fallback = heartbeatCopy(
+                    reminder, fallbackHeartbeatWakeAt(), AutomationStore.ReminderStatus.PENDING,
+                    reminder.message(), HEARTBEAT_SOURCE_DEFAULT, reason);
+            store.saveReminder(fallback);
+            scheduleReminder(fallback);
+            return;
+        }
         store.saveReminder(copyReminder(reminder, AutomationStore.ReminderStatus.FAILED, reason, attempts));
         pauseRecurringTaskIfNeeded(reminder, reason);
         try {
@@ -828,12 +1000,12 @@ public class AutomationRuntime implements InitializingBean {
         if (triggeredByUserId == null || triggeredByUserId.isBlank()) {
             return;
         }
-        String recipientId = resolveRecipientId();
-        if (recipientId == null || !recipientId.equals(triggeredByUserId)) {
-            return;
-        }
         Instant now = clock.instant();
         for (AutomationStore.Reminder reminder : store.listReminders(AutomationStore.ReminderStatus.PENDING)) {
+            String recipientId = resolveRecipientIdForOwner(reminder.ownerId());
+            if (!triggeredByUserId.equals(recipientId)) {
+                continue;
+            }
             if (!reminder.remindAt().isAfter(now)) {
                 log.info("retrying overdue pending reminder: id={}, title={}", reminder.id(), reminder.title());
                 triggerReminder(reminder.id());
@@ -841,11 +1013,222 @@ public class AutomationRuntime implements InitializingBean {
         }
     }
 
+    void runHeartbeatWatchdog() {
+        if (!properties.isHeartbeatEnabled()) {
+            return;
+        }
+        store.listReminders(null).stream()
+                .filter(this::isHeartbeat)
+                .map(AutomationStore.Reminder::ownerId)
+                .filter(owner -> owner != null && !owner.isBlank())
+                .forEach(knownHeartbeatUsers::add);
+        seedConfiguredHeartbeatUser();
+
+        Instant now = clock.instant();
+        log.info("[HEARTBEAT] watchdog check started users={} at={}",
+                knownHeartbeatUsers.size(), now);
+        for (String userId : List.copyOf(knownHeartbeatUsers)) {
+            Optional<AutomationStore.Reminder> active = activeHeartbeatFor(userId);
+            if (active.isEmpty()) {
+                log.info("[HEARTBEAT] watchdog waking userId={} reason=missing-next-wake", userId);
+                AutomationStore.Reminder heartbeat = upsertHeartbeat(
+                        userId, now.plusSeconds(1), HEARTBEAT_SOURCE_DEFAULT,
+                        "hourly watchdog repaired missing wake time", true);
+                triggerReminder(heartbeat.id());
+                continue;
+            }
+            AutomationStore.Reminder heartbeat = active.get();
+            if (heartbeat.status() == AutomationStore.ReminderStatus.PENDING
+                    && !heartbeat.remindAt().isAfter(now)) {
+                log.info("[HEARTBEAT] watchdog waking userId={} heartbeatId={} reason=due "
+                                + "scheduledFor={}",
+                        userId, heartbeat.id(), heartbeat.remindAt());
+                triggerReminder(heartbeat.id());
+                continue;
+            }
+            if (heartbeat.status() == AutomationStore.ReminderStatus.TRIGGERING
+                    && heartbeat.updatedAt().plus(Duration.ofMinutes(
+                            Math.max(5, properties.getHeartbeatBusyDeferralMinutes() * 2L))).isBefore(now)) {
+                log.warn("[HEARTBEAT] watchdog recovering stuck wake userId={} heartbeatId={} updatedAt={}",
+                        userId, heartbeat.id(), heartbeat.updatedAt());
+                store.transitionReminderStatus(heartbeat.id(), AutomationStore.ReminderStatus.TRIGGERING,
+                        AutomationStore.ReminderStatus.PENDING, now);
+                triggerReminder(heartbeat.id());
+                continue;
+            }
+            log.info("[HEARTBEAT] watchdog skipped userId={} heartbeatId={} status={} "
+                            + "nextWakeAt={} source={}",
+                    userId, heartbeat.id(), heartbeat.status(), heartbeat.remindAt(),
+                    heartbeat.actionTarget());
+        }
+    }
+
+    private void seedConfiguredHeartbeatUser() {
+        String configured = properties.getDefaultRecipientId();
+        if (configured != null && !configured.isBlank()) {
+            registerHeartbeatUser(configured.trim());
+            return;
+        }
+        store.getRecipientBinding().map(AutomationStore.RecipientBinding::recipientId)
+                .filter(value -> value != null && !value.isBlank())
+                .ifPresent(this::registerHeartbeatUser);
+    }
+
+    private void registerHeartbeatUser(String userId) {
+        String normalized = userId.trim();
+        knownHeartbeatUsers.add(normalized);
+        ensureDefaultHeartbeat(normalized);
+    }
+
+    private synchronized AutomationStore.Reminder rebaseHeartbeatAfterUserActivity(String userId) {
+        Instant nextWakeAt = clampHeartbeatWakeAt(clock.instant().plus(Duration.ofMinutes(
+                Math.max(1, properties.getHeartbeatFallbackMinutes()))));
+        Optional<AutomationStore.Reminder> active = activeHeartbeatFor(userId);
+        if (active.isEmpty()) {
+            return upsertHeartbeat(userId, nextWakeAt, HEARTBEAT_SOURCE_USER_ACTIVITY,
+                    "user activity changed heartbeat context", true);
+        }
+
+        AutomationStore.Reminder current = active.get();
+        if (current.status() != AutomationStore.ReminderStatus.TRIGGERING
+                && HEARTBEAT_SOURCE_AGENT.equals(current.actionTarget())
+                && !current.remindAt().isAfter(nextWakeAt)) {
+            log.info("[HEARTBEAT] user activity kept earlier agent wake userId={} heartbeatId={} "
+                            + "nextWakeAt={} source={}",
+                    userId, current.id(), current.remindAt(), current.actionTarget());
+            return current;
+        }
+
+        Instant previousWakeAt = current.remindAt();
+        AutomationStore.ReminderStatus status = current.status() == AutomationStore.ReminderStatus.TRIGGERING
+                ? AutomationStore.ReminderStatus.TRIGGERING : AutomationStore.ReminderStatus.PENDING;
+        AutomationStore.Reminder updated = heartbeatCopy(
+                current, nextWakeAt, status,
+                "user activity changed heartbeat context", HEARTBEAT_SOURCE_USER_ACTIVITY, null);
+        store.saveReminder(updated);
+        if (status == AutomationStore.ReminderStatus.PENDING) {
+            scheduler.cancel(updated.id());
+            scheduleReminder(updated);
+        }
+        log.info("[HEARTBEAT] wake rebased by user activity userId={} heartbeatId={} "
+                        + "previousWakeAt={} nextWakeAt={} source={}",
+                userId, updated.id(), previousWakeAt, updated.remindAt(), updated.actionTarget());
+        return updated;
+    }
+
+    private AutomationStore.Reminder ensureDefaultHeartbeat(String userId) {
+        Optional<AutomationStore.Reminder> existing = activeHeartbeatFor(userId);
+        if (existing.isPresent()) {
+            return existing.get();
+        }
+        Instant fallback = clock.instant().plus(Duration.ofMinutes(
+                Math.max(1, properties.getHeartbeatFallbackMinutes())));
+        return upsertHeartbeat(userId, fallback, HEARTBEAT_SOURCE_DEFAULT,
+                "default heartbeat", true);
+    }
+
+    private synchronized AutomationStore.Reminder upsertHeartbeat(String userId,
+                                                                   Instant wakeAt,
+                                                                   String source,
+                                                                   String reason,
+                                                                   boolean replaceExisting) {
+        Optional<AutomationStore.Reminder> active = activeHeartbeatFor(userId);
+        if (active.isPresent()) {
+            AutomationStore.Reminder current = active.get();
+            if (current.status() == AutomationStore.ReminderStatus.TRIGGERING) {
+                AutomationStore.Reminder updated = heartbeatCopy(
+                        current, wakeAt, AutomationStore.ReminderStatus.TRIGGERING,
+                        reason, source, null);
+                store.saveReminder(updated);
+                return updated;
+            }
+            Instant effectiveWakeAt = replaceExisting
+                    ? wakeAt : (wakeAt.isBefore(current.remindAt()) ? wakeAt : current.remindAt());
+            String effectiveSource = replaceExisting || effectiveWakeAt.equals(wakeAt)
+                    ? source : current.actionTarget();
+            String effectiveReason = effectiveWakeAt.equals(wakeAt) ? reason : current.message();
+            AutomationStore.Reminder updated = heartbeatCopy(
+                    current, effectiveWakeAt, AutomationStore.ReminderStatus.PENDING,
+                    effectiveReason, effectiveSource, null);
+            store.saveReminder(updated);
+            scheduler.cancel(updated.id());
+            scheduleReminder(updated);
+            log.info("[HEARTBEAT] wake updated userId={} heartbeatId={} nextWakeAt={} source={}",
+                    userId, updated.id(), updated.remindAt(), updated.actionTarget());
+            return updated;
+        }
+
+        Instant now = clock.instant();
+        AutomationStore.Reminder heartbeat = new AutomationStore.Reminder(
+                newReminderId(),
+                "agent heartbeat",
+                wakeAt,
+                normalizeOptional(reason, "agent heartbeat"),
+                AutomationStore.ReminderStatus.PENDING,
+                now,
+                now,
+                null,
+                0,
+                AutomationStore.AutomationActionType.TEXT,
+                source,
+                null,
+                AutomationStore.AutomationTaskKind.AGENT_HEARTBEAT,
+                "Evaluate whether to contact the user or resume a sleeping task, then choose the next wake time.",
+                null,
+                List.of(),
+                0,
+                userId);
+        store.saveReminder(heartbeat);
+        scheduleReminder(heartbeat);
+        log.info("[HEARTBEAT] wake created userId={} heartbeatId={} nextWakeAt={} source={}",
+                userId, heartbeat.id(), heartbeat.remindAt(), heartbeat.actionTarget());
+        return heartbeat;
+    }
+
+    private Optional<AutomationStore.Reminder> activeHeartbeatFor(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return Optional.empty();
+        }
+        return store.listReminders(null).stream()
+                .filter(this::isHeartbeat)
+                .filter(reminder -> userId.equals(reminder.ownerId()))
+                .filter(reminder -> reminder.status() == AutomationStore.ReminderStatus.PENDING
+                        || reminder.status() == AutomationStore.ReminderStatus.TRIGGERING)
+                .min(java.util.Comparator.comparing(AutomationStore.Reminder::remindAt));
+    }
+
+    private boolean isHeartbeat(AutomationStore.Reminder reminder) {
+        return effectiveTaskKind(reminder) == AutomationStore.AutomationTaskKind.AGENT_HEARTBEAT;
+    }
+
+    private Instant clampHeartbeatWakeAt(Instant requested) {
+        Instant now = clock.instant();
+        Instant minimum = now.plus(Duration.ofMinutes(
+                Math.max(1, properties.getHeartbeatMinIntervalMinutes())));
+        Instant maximum = now.plus(Duration.ofHours(
+                Math.max(1, properties.getHeartbeatMaxIntervalHours())));
+        if (requested == null || requested.isBefore(minimum)) {
+            return minimum;
+        }
+        return requested.isAfter(maximum) ? maximum : requested;
+    }
+
+    private Instant fallbackHeartbeatWakeAt() {
+        return clampHeartbeatWakeAt(clock.instant().plus(Duration.ofMinutes(
+                Math.max(1, properties.getHeartbeatFallbackMinutes()))));
+    }
+
     private void reschedulePendingReminders() {
         Instant now = clock.instant();
         for (AutomationStore.Reminder reminder : store.listReminders(AutomationStore.ReminderStatus.PENDING)) {
             if (reminder.remindAt().isAfter(now)) {
-                scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+                scheduleReminder(reminder);
+            } else if (isHeartbeat(reminder)) {
+                AutomationStore.Reminder recovered = heartbeatCopy(
+                        reminder, now.plusSeconds(5), AutomationStore.ReminderStatus.PENDING,
+                        reminder.message(), reminder.actionTarget(), "recovered overdue heartbeat on startup");
+                store.saveReminder(recovered);
+                scheduleReminder(recovered);
             } else if (properties.isSendMissedRemindersOnStartup()) {
                 triggerReminder(reminder.id());
             } else {
@@ -871,23 +1254,24 @@ public class AutomationRuntime implements InitializingBean {
     }
 
     private Optional<AutomationStore.Reminder> findRecentDuplicate(String title, Instant remindAt, String message, Instant now) {
+        String ownerId = currentUserId();
         return store.listReminders(AutomationStore.ReminderStatus.PENDING).stream()
                 .filter(reminder -> reminder.title().equals(title))
                 .filter(reminder -> reminder.remindAt().equals(remindAt))
                 .filter(reminder -> reminder.message().equals(message))
-                .filter(reminder -> reminder.createdAt().plusSeconds(30).isAfter(now))
+                .filter(reminder -> java.util.Objects.equals(reminder.ownerId(), ownerId))
+                .filter(reminder -> reminder.createdAt().plusSeconds(60).isAfter(now))
                 .findFirst();
     }
 
-    private String resolveRecipientId() {
-        String configured = properties.getDefaultRecipientId();
-        if (configured != null && !configured.isBlank()) {
-            return configured.trim();
+    private String resolveRecipientIdForOwner(String ownerId) {
+        if (ownerId != null && !ownerId.isBlank()) {
+            return ownerId;
         }
-        return store.getRecipientBinding()
-                .map(AutomationStore.RecipientBinding::recipientId)
-                .filter(recipientId -> !recipientId.isBlank())
-                .orElse(null);
+        // Legacy ownerless reminders are safe only with an explicit static recipient.
+        // A mutable "last bound user" could leak an old reminder to a different user.
+        String configured = properties.getDefaultRecipientId();
+        return configured != null && !configured.isBlank() ? configured.trim() : null;
     }
 
     private AutomationStore.Reminder copyReminder(AutomationStore.Reminder reminder,
@@ -911,7 +1295,35 @@ public class AutomationRuntime implements InitializingBean {
                 reminder.instruction(),
                 reminder.originalRequest(),
                 reminder.expectedToolCategories(),
-                effectiveMaxRetries(reminder));
+                effectiveMaxRetries(reminder),
+                reminder.ownerId());
+    }
+
+    private AutomationStore.Reminder heartbeatCopy(AutomationStore.Reminder reminder,
+                                                    Instant wakeAt,
+                                                    AutomationStore.ReminderStatus status,
+                                                    String reason,
+                                                    String source,
+                                                    String failureMessage) {
+        return new AutomationStore.Reminder(
+                reminder.id(),
+                reminder.title(),
+                wakeAt,
+                normalizeOptional(reason, reminder.message()),
+                status,
+                reminder.createdAt(),
+                clock.instant(),
+                failureMessage,
+                0,
+                AutomationStore.AutomationActionType.TEXT,
+                source,
+                null,
+                AutomationStore.AutomationTaskKind.AGENT_HEARTBEAT,
+                reminder.instruction(),
+                reminder.originalRequest(),
+                reminder.expectedToolCategories(),
+                0,
+                reminder.ownerId());
     }
 
     private Instant parseInstant(String value) {
@@ -943,15 +1355,15 @@ public class AutomationRuntime implements InitializingBean {
     }
 
     private static String newReminderId() {
-        return "R-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        return "R-" + UUID.randomUUID().toString().substring(0, 12).toUpperCase(Locale.ROOT);
     }
 
     private static String newScheduleId() {
-        return "S-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        return "S-" + UUID.randomUUID().toString().substring(0, 12).toUpperCase(Locale.ROOT);
     }
 
     private static String newRecurringTaskId() {
-        return "RR-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
+        return "RR-" + UUID.randomUUID().toString().substring(0, 12).toUpperCase(Locale.ROOT);
     }
 
     private Instant computeNextRunAt(AutomationStore.RecurringScheduleType scheduleType,
@@ -1021,9 +1433,10 @@ public class AutomationRuntime implements InitializingBean {
                 task.instruction(),
                 task.originalRequest(),
                 task.expectedToolCategories(),
-                effectiveMaxRetries(task));
+                effectiveMaxRetries(task))
+                .withOwnerId(task.ownerId());
         store.saveReminder(reminder);
-        scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
+        scheduleReminder(reminder);
     }
 
     private void advanceRecurringTaskIfNeeded(AutomationStore.Reminder reminder) {
@@ -1074,7 +1487,12 @@ public class AutomationRuntime implements InitializingBean {
                 task.instruction(),
                 task.originalRequest(),
                 task.expectedToolCategories(),
-                effectiveMaxRetries(task));
+                effectiveMaxRetries(task),
+                task.ownerId());
+    }
+
+    private void scheduleReminder(AutomationStore.Reminder reminder) {
+        scheduler.schedule(reminder, () -> triggerReminder(reminder.id()));
     }
 
     private void pauseRecurringTaskIfNeeded(AutomationStore.Reminder reminder, String failureMessage) {
@@ -1178,6 +1596,9 @@ public class AutomationRuntime implements InitializingBean {
         void schedule(AutomationStore.Reminder reminder, Runnable task);
 
         boolean cancel(String reminderId);
+
+        default void scheduleWatchdog(Duration interval, Runnable task) {
+        }
     }
 
     public interface ReminderDispatcher {
@@ -1186,37 +1607,59 @@ public class AutomationRuntime implements InitializingBean {
 
     public record ReminderResult(boolean success, AutomationStore.Reminder reminder, String message) {
         static ReminderResult success(AutomationStore.Reminder reminder, String message) {
+            AutomationEvidenceContext.recordReminder(reminder);
             return new ReminderResult(true, reminder, message);
         }
 
         static ReminderResult failure(String message) {
+            AutomationEvidenceContext.recordFailure(
+                    AutomationEvidenceContext.EntityType.REMINDER, message);
             return new ReminderResult(false, null, message);
         }
     }
 
     public record ScheduleResult(boolean success, AutomationStore.ScheduleItem item, String message) {
         static ScheduleResult success(AutomationStore.ScheduleItem item, String message) {
+            AutomationEvidenceContext.recordSchedule(item);
             return new ScheduleResult(true, item, message);
         }
 
         static ScheduleResult failure(String message) {
+            AutomationEvidenceContext.recordFailure(
+                    AutomationEvidenceContext.EntityType.SCHEDULE, message);
             return new ScheduleResult(false, null, message);
         }
     }
 
     public record RecurringTaskResult(boolean success, AutomationStore.RecurringTask task, String message) {
         static RecurringTaskResult success(AutomationStore.RecurringTask task, String message) {
+            AutomationEvidenceContext.recordRecurring(task);
             return new RecurringTaskResult(true, task, message);
         }
 
         static RecurringTaskResult failure(String message) {
+            AutomationEvidenceContext.recordFailure(
+                    AutomationEvidenceContext.EntityType.RECURRING, message);
             return new RecurringTaskResult(false, null, message);
         }
     }
 
-    public static class SpringReminderScheduler implements ReminderScheduler {
+    public record HeartbeatResult(boolean success, Instant nextWakeAt, String heartbeatId, String message) {
+        static HeartbeatResult success(Instant nextWakeAt, String heartbeatId) {
+            return new HeartbeatResult(true, nextWakeAt, heartbeatId, "agent wake scheduled");
+        }
+
+        static HeartbeatResult failure(String message) {
+            return new HeartbeatResult(false, null, null, message);
+        }
+    }
+
+    public static class SpringReminderScheduler implements ReminderScheduler, org.springframework.beans.factory.DisposableBean {
         private final TaskScheduler taskScheduler;
         private final Map<String, ScheduledFuture<?>> futures = new ConcurrentHashMap<>();
+        private final java.util.concurrent.ExecutorService executionExecutor =
+                java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+        private volatile ScheduledFuture<?> watchdogFuture;
 
         public SpringReminderScheduler(TaskScheduler taskScheduler) {
             this.taskScheduler = taskScheduler;
@@ -1225,7 +1668,14 @@ public class AutomationRuntime implements InitializingBean {
         @Override
         public void schedule(AutomationStore.Reminder reminder, Runnable task) {
             cancel(reminder.id());
-            ScheduledFuture<?> future = taskScheduler.schedule(task, reminder.remindAt());
+            Runnable selfCleaning = () -> {
+                try {
+                    executionExecutor.submit(task);
+                } finally {
+                    futures.remove(reminder.id());
+                }
+            };
+            ScheduledFuture<?> future = taskScheduler.schedule(selfCleaning, reminder.remindAt());
             if (future != null) {
                 futures.put(reminder.id(), future);
             }
@@ -1235,6 +1685,22 @@ public class AutomationRuntime implements InitializingBean {
         public boolean cancel(String reminderId) {
             ScheduledFuture<?> future = futures.remove(reminderId);
             return future != null && future.cancel(false);
+        }
+
+        @Override
+        public synchronized void scheduleWatchdog(Duration interval, Runnable task) {
+            if (watchdogFuture != null) {
+                watchdogFuture.cancel(false);
+            }
+            watchdogFuture = taskScheduler.scheduleWithFixedDelay(
+                    () -> executionExecutor.submit(task), interval);
+        }
+
+        @Override
+        public void destroy() {
+            ScheduledFuture<?> watchdog = watchdogFuture;
+            if (watchdog != null) watchdog.cancel(false);
+            executionExecutor.shutdownNow();
         }
     }
 }

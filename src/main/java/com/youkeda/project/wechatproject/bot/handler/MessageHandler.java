@@ -1,12 +1,14 @@
 package com.youkeda.project.wechatproject.bot.handler;
 
 import com.github.wechat.ilink.sdk.ILinkClient;
+import com.github.wechat.ilink.sdk.core.exception.ProtocolException;
 import com.github.wechat.ilink.sdk.core.listener.OnMessageListener;
 import com.github.wechat.ilink.sdk.core.model.FileItem;
 import com.github.wechat.ilink.sdk.core.model.MessageItem;
 import com.github.wechat.ilink.sdk.core.model.TextItem;
 import com.github.wechat.ilink.sdk.core.model.VoiceItem;
 import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
+import com.youkeda.project.wechatproject.bot.memory.ConversationMemory;
 import com.youkeda.project.wechatproject.bot.memory.RagStore;
 import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
 import com.youkeda.project.wechatproject.bot.service.DocumentService;
@@ -19,6 +21,7 @@ import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
 
 import javax.imageio.IIOImage;
@@ -37,9 +40,19 @@ import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
-public class MessageHandler implements OnMessageListener, InitializingBean {
+public class MessageHandler implements OnMessageListener, InitializingBean, DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(MessageHandler.class);
 
@@ -52,6 +65,22 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     private static final float JPEG_QUALITY = 0.8f;
     private static final long MAX_FILE_SIZE = 10 * 1024 * 1024;
 
+    // iLink message send retry: ProtocolException (ret=-2, prepare failed) needs a
+    // longer delay — it's typically session-level (rate limit / token expiry), not a
+    // transient network glitch. 3 retries × 3s = 9s window for heartbeat to recover.
+    private static final int SEND_MAX_RETRIES = 3;
+    private static final long SEND_RETRY_DELAY_MS = 3000;
+    // Delay between consecutive image sends to avoid iLink rate limiting.
+    private static final long INTER_IMAGE_DELAY_MS = 800;
+    // Keep final reply batches below iLink's practical text/rate limits.
+    static final int MAX_TEXT_MESSAGE_CODE_POINTS = 1800;
+    static final long INTER_MESSAGE_DELAY_MS = 10_000;
+    // Wait time for iLink session recovery after a send failure before retrying.
+    private static final long SESSION_RECOVERY_DELAY_MS = 15_000;
+    private static final long OUTBOX_POLL_INTERVAL_MS = 10_000;
+    private static final long OUTBOX_INITIAL_RETRY_MS = 30_000;
+    private static final long OUTBOX_MAX_RETRY_MS = 5 * 60_000;
+
     private final ILinkClient ilinkClient;
     private final MessageBridge messageBridge;
     private final MessageRouter router;
@@ -60,6 +89,15 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     private final DocumentService documentService;
     private final AutomationRuntime automationRuntime;
     private final RagStore ragStore;
+    private final ConversationMemory conversationMemory;
+    private final ExecutorService messageExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    private final ScheduledExecutorService deliveryRetryExecutor =
+            Executors.newSingleThreadScheduledExecutor();
+    private final ConcurrentHashMap<String, CompletableFuture<Void>> userMessageTails = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ConcurrentLinkedQueue<PendingDelivery>> pendingDeliveries =
+            new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ReentrantLock> deliveryLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> inboundContextEpochs = new ConcurrentHashMap<>();
 
     public MessageHandler(ILinkClient ilinkClient,
                           MessageBridge messageBridge,
@@ -68,7 +106,8 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
                           AudioConverter audioConverter,
                           DocumentService documentService,
                           AutomationRuntime automationRuntime,
-                          RagStore ragStore) {
+                          RagStore ragStore,
+                          ConversationMemory conversationMemory) {
         this.ilinkClient = ilinkClient;
         this.messageBridge = messageBridge;
         this.router = router;
@@ -77,19 +116,65 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         this.documentService = documentService;
         this.automationRuntime = automationRuntime;
         this.ragStore = ragStore;
+        this.conversationMemory = conversationMemory;
     }
 
     @Override
     public void afterPropertiesSet() {
         messageBridge.addListener(this);
+        deliveryRetryExecutor.scheduleWithFixedDelay(
+                this::retryPendingDeliveriesSafely,
+                OUTBOX_POLL_INTERVAL_MS, OUTBOX_POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
         log.info("message handler registered to message bridge");
     }
 
     @Override
     public void onMessages(List<WeixinMessage> messages) {
         for (WeixinMessage msg : messages) {
-            handleMessage(msg);
+            String userId = msg != null ? msg.getFrom_user_id() : null;
+            if (userId == null || userId.isBlank()) {
+                continue;
+            }
+            router.markUserActivity(userId);
+            if (automationRuntime != null) {
+                automationRuntime.markUserActivity(userId);
+            }
+            inboundContextEpochs.merge(userId, 1L, Long::sum);
+            userMessageTails.compute(userId, (key, previous) -> {
+                CompletableFuture<Void> ready = previous == null
+                        ? CompletableFuture.completedFuture(null)
+                        : previous.handle((ignored, error) -> null);
+                CompletableFuture<Void> next = ready.thenRunAsync(() -> handleMessageSafely(msg), messageExecutor);
+                next.whenComplete((ignored, error) -> userMessageTails.remove(key, next));
+                return next;
+            });
         }
+    }
+
+    private void handleMessageSafely(WeixinMessage message) {
+        try {
+            handleMessage(message);
+        } catch (RuntimeException e) {
+            log.error("async message handling failed", e);
+        }
+    }
+
+    @Override
+    public void destroy() {
+        deliveryRetryExecutor.shutdownNow();
+        messageExecutor.shutdown();
+        try {
+            if (!messageExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                messageExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            messageExecutor.shutdownNow();
+        }
+        userMessageTails.clear();
+        pendingDeliveries.clear();
+        deliveryLocks.clear();
+        inboundContextEpochs.clear();
     }
 
     private void handleMessage(WeixinMessage msg) {
@@ -99,6 +184,8 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
             return;
         }
 
+        retryPendingDeliveryAfterContextRefresh(fromUserId);
+
         List<MessageItem> items = msg.getItem_list();
         if (items == null || items.isEmpty()) {
             return;
@@ -107,23 +194,30 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         String text = extractText(items);
         List<String> imageBase64Urls = downloadImages(items);
 
+        String fileAnnot = null;
+        String voiceAnnot = null;
+        boolean hasImages = !imageBase64Urls.isEmpty();
+
         ParseResult fileResult = parseFiles(items);
         if (fileResult != null) {
             indexFileContent(fromUserId, fileResult);
-            text = annotateFileContent(fileResult, text);
+            String ext = DocumentService.extractExtension(fileResult.fileName());
+            String typeDesc = fileTypeDescription(ext);
+            fileAnnot = MessageAnnotation.fileAnnotation(
+                    fileResult.fileName(), typeDesc, fileResult.text(), fileResult.images().size());
             List<String> fileImageUrls = compressFileImages(fileResult.images());
             List<String> combinedImages = new ArrayList<>(fileImageUrls);
             combinedImages.addAll(imageBase64Urls);
             imageBase64Urls = combinedImages;
         }
 
-        if (text.isBlank()) {
-            if (!imageBase64Urls.isEmpty()) {
-                text = "【用户发送了图片，但未说明要做什么。请根据图片内容询问用户需求。】";
+        if (text == null || text.isBlank()) {
+            if (hasImages) {
+                // Let MessageAnnotation.build handle IMAGE_ONLY hint
             } else {
                 String voiceText = extractVoiceText(items);
                 if (voiceText != null && !voiceText.isBlank()) {
-                    text = "【用户语音消息】\n语音识别结果：\n" + voiceText;
+                    voiceAnnot = MessageAnnotation.voiceAnnotation(voiceText);
                 } else {
                     replyNotSupported(fromUserId);
                     return;
@@ -131,10 +225,28 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
             }
         }
 
+        text = MessageAnnotation.build(text, fileAnnot, voiceAnnot, hasImages && (text == null || text.isBlank()));
+
         try {
-            ModelReply reply = router.route(fromUserId, text, imageBase64Urls);
-            dispatch(fromUserId, reply);
-            log.info("reply dispatched to user={}, type={}", fromUserId, reply.getType());
+            // Per-node progress is intentionally log-only. It previously exhausted the same
+            // iLink conversation context before the final result could be delivered.
+            Consumer<String> progressCb = progressText ->
+                    log.info("[DAG-PROGRESS] user={} message={}", fromUserId, progressText);
+            Consumer<List<ModelReply>> completionCb = replies -> {
+                boolean delivered = dispatch(fromUserId, replies);
+                if (delivered) {
+                    log.info("[DELIVERY] async DAG replies DELIVERED user={} count={}",
+                            fromUserId, replies != null ? replies.size() : 0);
+                } else {
+                    log.warn("[DELIVERY] async DAG replies PENDING_RETRY user={} count={}",
+                            fromUserId, replies != null ? replies.size() : 0);
+                }
+            };
+            List<ModelReply> replies = router.route(
+                    fromUserId, text, imageBase64Urls, progressCb, completionCb);
+            boolean delivered = dispatch(fromUserId, replies);
+            log.info("[DELIVERY] synchronous replies {} user={} count={}",
+                    delivered ? "DELIVERED" : "PENDING_RETRY", fromUserId, replies.size());
         } catch (IOException e) {
             log.error("route failed for user={}", fromUserId, e);
             sendErrorReply(fromUserId, e.getMessage());
@@ -152,44 +264,340 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         }
     }
 
-    private void dispatch(String toUser, ModelReply reply) throws IOException {
+    /**
+     * Dispatches a list of replies to user, sending each one as a separate message.
+     * On first protocol failure, waits for the iLink heartbeat to restore the session
+     * and retries once before giving up.
+     */
+    private boolean dispatch(String toUser, List<ModelReply> replies) {
+        if (replies == null || replies.isEmpty()) return true;
+        ReentrantLock lock = deliveryLock(toUser);
+        lock.lock();
+        try {
+            long attemptedContextEpoch = contextEpoch(toUser);
+            return dispatchLocked(toUser, expandTextReplies(replies), attemptedContextEpoch);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private boolean dispatchLocked(String toUser, List<ModelReply> deliveryReplies,
+                                   long attemptedContextEpoch) {
+        int sentCount = dispatchBatch(toUser, deliveryReplies, 0);
+        if (sentCount >= deliveryReplies.size()) return true;
+
+        // Recovery: wait for iLink heartbeat to restore session, then retry remaining
+        log.info("waiting {}ms for iLink session recovery for user={}, {} of {} replies sent",
+                SESSION_RECOVERY_DELAY_MS, toUser, sentCount, deliveryReplies.size());
+        sleepQuietly(SESSION_RECOVERY_DELAY_MS);
+
+        log.info("retrying {} remaining replies for user={}",
+                deliveryReplies.size() - sentCount, toUser);
+        int sent2 = dispatchBatch(toUser, deliveryReplies, sentCount);
+        if (sent2 < deliveryReplies.size()) {
+            log.warn("retry also failed for user={}, {} of {} replies unsent",
+                    toUser, deliveryReplies.size() - sent2, deliveryReplies.size());
+            saveUnsentToMemory(toUser, deliveryReplies, sent2);
+            enqueuePendingDelivery(toUser,
+                    deliveryReplies.subList(sent2, deliveryReplies.size()), attemptedContextEpoch);
+            return false;
+        }
+        return true;
+    }
+
+    static List<ModelReply> expandTextReplies(List<ModelReply> replies) {
+        if (replies == null || replies.isEmpty()) return List.of();
+        List<ModelReply> expanded = new ArrayList<>();
+        for (ModelReply reply : replies) {
+            if (reply == null) continue;
+            String text = reply.getTextContent();
+            List<String> chunks = splitTextForDelivery(text);
+            if (chunks.size() <= 1) {
+                expanded.add(reply);
+                continue;
+            }
+
+            chunks.forEach(chunk -> expanded.add(ModelReply.text(chunk)));
+            if (reply.getType() == ModelReply.Type.MIXED
+                    && (!reply.getImages().isEmpty()
+                    || reply.getAudioPayload() != null
+                    || reply.getFilePayload() != null)) {
+                expanded.add(new ModelReply(
+                        ModelReply.Type.MIXED, null, reply.getImages(),
+                        reply.getAudioPayload(), reply.getFilePayload()));
+            }
+        }
+        return List.copyOf(expanded);
+    }
+
+    static List<String> splitTextForDelivery(String text) {
+        if (text == null || text.isEmpty()
+                || text.codePointCount(0, text.length()) <= MAX_TEXT_MESSAGE_CODE_POINTS) {
+            return text == null ? List.of() : List.of(text);
+        }
+
+        List<String> chunks = new ArrayList<>();
+        int start = 0;
+        while (start < text.length()) {
+            int remaining = text.codePointCount(start, text.length());
+            if (remaining <= MAX_TEXT_MESSAGE_CODE_POINTS) {
+                chunks.add(text.substring(start));
+                break;
+            }
+            int hardEnd = text.offsetByCodePoints(start, MAX_TEXT_MESSAGE_CODE_POINTS);
+            int end = preferredSplitBoundary(text, start, hardEnd);
+            chunks.add(text.substring(start, end));
+            start = end;
+        }
+        return List.copyOf(chunks);
+    }
+
+    private static int preferredSplitBoundary(String text, int start, int hardEnd) {
+        int minimumCodePoints = MAX_TEXT_MESSAGE_CODE_POINTS * 2 / 3;
+        int minimum = text.offsetByCodePoints(start, minimumCodePoints);
+        for (int index = hardEnd; index > minimum; ) {
+            int codePoint = text.codePointBefore(index);
+            if (Character.isWhitespace(codePoint) || isSentenceBoundary(codePoint)) {
+                return index;
+            }
+            index -= Character.charCount(codePoint);
+        }
+        return hardEnd;
+    }
+
+    private static boolean isSentenceBoundary(int codePoint) {
+        return codePoint == '。' || codePoint == '！' || codePoint == '？'
+                || codePoint == '；' || codePoint == '.' || codePoint == '!'
+                || codePoint == '?' || codePoint == ';';
+    }
+
+    private void enqueuePendingDelivery(String userId, List<ModelReply> replies) {
+        enqueuePendingDelivery(userId, replies, contextEpoch(userId));
+    }
+
+    private void enqueuePendingDelivery(String userId, List<ModelReply> replies,
+                                        long attemptedContextEpoch) {
+        if (replies == null || replies.isEmpty()) return;
+        List<ModelReply> deliveryReplies = expandTextReplies(replies);
+        PendingDelivery pending = new PendingDelivery(
+                UUID.randomUUID().toString(), deliveryReplies,
+                0, System.currentTimeMillis() + OUTBOX_INITIAL_RETRY_MS,
+                attemptedContextEpoch);
+        pendingDeliveries.computeIfAbsent(userId, ignored -> new ConcurrentLinkedQueue<>())
+                .offer(pending);
+        log.warn("[DELIVERY] queued outboxId={} user={} replies={} nextRetryMs={}",
+                pending.id, userId, deliveryReplies.size(), OUTBOX_INITIAL_RETRY_MS);
+    }
+
+    private void retryPendingDeliveriesSafely() {
+        try {
+            retryPendingDeliveries();
+        } catch (Exception e) {
+            log.warn("[DELIVERY] outbox retry sweep failed: {}", e.getMessage(), e);
+        }
+    }
+
+    private void retryPendingDeliveries() {
+        pendingDeliveries.keySet().forEach(userId -> retryPendingDelivery(userId, false));
+    }
+
+    private void retryPendingDeliveryAfterContextRefresh(String userId) {
+        retryPendingDelivery(userId, true);
+    }
+
+    private void retryPendingDelivery(String userId, boolean contextJustRefreshed) {
+        ConcurrentLinkedQueue<PendingDelivery> queue = pendingDeliveries.get(userId);
+        if (queue == null) return;
+        PendingDelivery pending = queue.peek();
+        if (pending == null) {
+            pendingDeliveries.remove(userId, queue);
+            return;
+        }
+
+        long currentEpoch = contextEpoch(userId);
+        if (currentEpoch <= pending.contextEpoch) {
+            return;
+        }
+        if (!contextJustRefreshed && pending.nextAttemptAt > System.currentTimeMillis()) {
+            return;
+        }
+
+        ReentrantLock lock = deliveryLock(userId);
+        if (!lock.tryLock()) {
+            return;
+        }
+        try {
+            log.info("[DELIVERY] retrying outboxId={} after context refresh user={} "
+                            + "attempt={} replies={} contextEpoch={}->{}",
+                    pending.id, userId, pending.attempts + 1, pending.replies.size(),
+                    pending.contextEpoch, currentEpoch);
+            int sent = dispatchBatch(userId, pending.replies, 0);
+            if (sent >= pending.replies.size()) {
+                queue.poll();
+                log.info("[DELIVERY] outbox DELIVERED outboxId={} user={} attempts={}",
+                        pending.id, userId, pending.attempts + 1);
+                if (queue.isEmpty()) pendingDeliveries.remove(userId, queue);
+                return;
+            }
+
+            pending.replies = List.copyOf(pending.replies.subList(sent, pending.replies.size()));
+            pending.attempts++;
+            pending.contextEpoch = currentEpoch;
+            long retryDelay = Math.min(OUTBOX_MAX_RETRY_MS,
+                    OUTBOX_INITIAL_RETRY_MS * (1L << Math.min(pending.attempts, 4)));
+            pending.nextAttemptAt = System.currentTimeMillis() + retryDelay;
+            log.warn("[DELIVERY] outbox still pending outboxId={} user={} attempts={} "
+                            + "remaining={} awaitingNewContext=true",
+                    pending.id, userId, pending.attempts, pending.replies.size());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private ReentrantLock deliveryLock(String userId) {
+        return deliveryLocks.computeIfAbsent(userId, ignored -> new ReentrantLock(true));
+    }
+
+    private long contextEpoch(String userId) {
+        return inboundContextEpochs.getOrDefault(userId, 0L);
+    }
+
+    private void sendStandaloneText(String userId, String text) throws IOException {
+        ReentrantLock lock = deliveryLock(userId);
+        lock.lock();
+        try {
+            sendWithRetry(() -> ilinkClient.sendText(userId, text), "sendText", userId);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Sends replies starting from {@code startIndex}. Returns new total sent count. */
+    private int dispatchBatch(String toUser, List<ModelReply> replies, int startIndex) {
+        int sentCount = startIndex;
+        for (int i = startIndex; i < replies.size(); i++) {
+            if (sentCount > 0) {
+                sleepQuietly(INTER_MESSAGE_DELAY_MS);
+            }
+            boolean ok = dispatchSingle(toUser, replies.get(i));
+            if (!ok) {
+                break;
+            }
+            sentCount++;
+        }
+        return sentCount;
+    }
+
+    /** Saves unsent reply text to conversation memory so context isn't lost. */
+    private void saveUnsentToMemory(String userId, List<ModelReply> replies, int sentCount) {
+        if (conversationMemory == null) return;
+        try {
+            for (int i = sentCount; i < replies.size(); i++) {
+                ModelReply reply = replies.get(i);
+                String text = reply.getTextContent();
+                if (text != null && !text.isBlank()) {
+                    conversationMemory.append(userId, "[未送达的系统回复]", text);
+                }
+            }
+            log.info("saved {} unsent replies to conversation memory for user={}",
+                    replies.size() - sentCount, userId);
+        } catch (Exception e) {
+            log.warn("failed to save unsent replies to memory for user={}", userId, e);
+        }
+    }
+
+    /**
+     * Dispatches a single reply to user. Returns true if at least one send succeeded.
+     */
+    private boolean dispatchSingle(String toUser, ModelReply reply) {
+        boolean anySuccess = false;
         switch (reply.getType()) {
             case TEXT -> {
-                trySendProgress(toUser, "正在思考...");
-                ilinkClient.sendText(toUser, reply.getTextContent());
+                try {
+                    sendWithRetry(() -> ilinkClient.sendText(toUser, reply.getTextContent()),
+                            "sendText", toUser);
+                    anySuccess = true;
+                } catch (Exception e) {
+                    log.error("failed to send TEXT reply to user={}", toUser, e);
+                }
             }
             case IMAGE -> {
-                trySendProgress(toUser, "正在生成图片，请稍候...");
                 for (ModelReply.ImagePayload img : reply.getImages()) {
-                    sendImageWithFallback(toUser, img);
+                    try {
+                        sendImageWithFallback(toUser, img);
+                        anySuccess = true;
+                    } catch (Exception e) {
+                        log.error("failed to send IMAGE to user={}", toUser, e);
+                    }
+                    sleepQuietly(INTER_IMAGE_DELAY_MS);
                 }
             }
             case MIXED -> {
-                trySendProgress(toUser, mixedProgressMessage(reply));
                 if (reply.getTextContent() != null && !reply.getTextContent().isBlank()) {
-                    ilinkClient.sendText(toUser, reply.getTextContent());
+                    try {
+                        sendWithRetry(() -> ilinkClient.sendText(toUser, reply.getTextContent()),
+                                "sendText", toUser);
+                        anySuccess = true;
+                    } catch (Exception e) {
+                        log.error("failed to send MIXED text to user={}", toUser, e);
+                    }
                 }
                 for (ModelReply.ImagePayload img : reply.getImages()) {
-                    sendImageWithFallback(toUser, img);
+                    try {
+                        sendImageWithFallback(toUser, img);
+                        anySuccess = true;
+                    } catch (Exception e) {
+                        log.error("failed to send MIXED image to user={}", toUser, e);
+                    }
+                    sleepQuietly(INTER_IMAGE_DELAY_MS);
                 }
                 if (reply.getFilePayload() != null) {
-                    ModelReply.FilePayload file = reply.getFilePayload();
-                    ilinkClient.sendFile(toUser, file.bytes(), file.fileName(), null);
+                    try {
+                        ModelReply.FilePayload file = reply.getFilePayload();
+                        sendWithRetry(() -> ilinkClient.sendFile(toUser, file.bytes(), file.fileName(), null),
+                                "sendFile", toUser);
+                        anySuccess = true;
+                    } catch (Exception e) {
+                        log.error("failed to send MIXED file to user={}", toUser, e);
+                    }
                 }
                 if (reply.getAudioPayload() != null) {
-                    sendAudioAsFile(toUser, reply.getAudioPayload());
+                    try {
+                        sendAudioAsFile(toUser, reply.getAudioPayload());
+                        anySuccess = true;
+                    } catch (Exception e) {
+                        log.error("failed to send MIXED audio to user={}", toUser, e);
+                    }
                 }
             }
             case VOICE -> {
-                trySendProgress(toUser, "正在生成语音，请稍候...");
-                sendAudioAsFile(toUser, reply.getAudioPayload());
+                try {
+                    sendAudioAsFile(toUser, reply.getAudioPayload());
+                    anySuccess = true;
+                } catch (Exception e) {
+                    log.error("failed to send VOICE to user={}", toUser, e);
+                }
             }
             case FILE -> {
-                trySendProgress(toUser, "正在生成文件，请稍候...");
-                ModelReply.FilePayload file = reply.getFilePayload();
-                ilinkClient.sendFile(toUser, file.bytes(), file.fileName(), null);
+                try {
+                    ModelReply.FilePayload file = reply.getFilePayload();
+                    sendWithRetry(() -> ilinkClient.sendFile(toUser, file.bytes(), file.fileName(), null),
+                            "sendFile", toUser);
+                    anySuccess = true;
+                } catch (Exception e) {
+                    log.error("failed to send FILE to user={}", toUser, e);
+                }
             }
         }
+        if (!anySuccess) {
+            log.warn("all dispatch paths failed for user={}, type={}", toUser, reply.getType());
+            try {
+                ilinkClient.sendText(toUser, "抱歉，消息发送失败了，请稍后再试。");
+            } catch (Exception ignored) {
+                log.debug("even error fallback text failed for user={}", toUser);
+            }
+        }
+        return anySuccess;
     }
 
     private void sendAudioAsFile(String toUser, ModelReply.AudioPayload audio) throws IOException {
@@ -200,7 +608,8 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
             throw new IOException("语音功能未启用，无法发送语音回复");
         }
         byte[] mp3Bytes = audioConverter.wavToMp3(audio.bytes());
-        ilinkClient.sendFile(toUser, mp3Bytes, "tts.mp3", null);
+        sendWithRetry(() -> ilinkClient.sendFile(toUser, mp3Bytes, "tts.mp3", null),
+                "sendAudioFile", toUser);
     }
 
     private static String mixedProgressMessage(ModelReply reply) {
@@ -233,8 +642,10 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     }
 
     private void sendImageWithFallback(String toUser, ModelReply.ImagePayload image) {
+        // Retry the image send first — ProtocolException often resolves after heartbeat
         try {
-            ilinkClient.sendImage(toUser, image.bytes(), image.fileName(), null);
+            sendWithRetry(() -> ilinkClient.sendImage(toUser, image.bytes(), image.fileName(), null),
+                    "sendImage", toUser);
             return;
         } catch (Exception imageError) {
             log.error("failed to send image to user={}, fileName={}, bytes={}",
@@ -260,11 +671,69 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         }
     }
 
-    private void trySendProgress(String toUser, String message) {
+    /**
+     * Retries an iLink send operation on ProtocolException (e.g. ret=-2 prepare failed).
+     * Waits between retries to allow the iLink heartbeat to restore the session.
+     * Only retries protocol-level errors, not IO or other exceptions.
+     */
+    private void sendWithRetry(IoSendOp op, String opName, String toUser) throws IOException {
+        ProtocolException lastProtocolError = null;
+        for (int attempt = 0; attempt < SEND_MAX_RETRIES; attempt++) {
+            try {
+                op.run();
+                return; // success
+            } catch (ProtocolException e) {
+                lastProtocolError = e;
+                if (attempt < SEND_MAX_RETRIES - 1) {
+                    log.warn("{} attempt {}/{} failed for user={}, retrying in {}ms: {}",
+                            opName, attempt + 1, SEND_MAX_RETRIES, toUser,
+                            SEND_RETRY_DELAY_MS, e.getMessage());
+                    try {
+                        Thread.sleep(SEND_RETRY_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("retry interrupted", ie);
+                    }
+                }
+            } catch (IOException e) {
+                // Non-protocol IO errors are not retried — rethrow immediately
+                throw e;
+            }
+        }
+        if (lastProtocolError != null) {
+            throw new IOException(opName + " failed with protocol error: " + lastProtocolError.getMessage(),
+                    lastProtocolError);
+        }
+        throw new IOException(opName + " failed after " + SEND_MAX_RETRIES + " attempts");
+    }
+
+    @FunctionalInterface
+    private interface IoSendOp {
+        void run() throws IOException;
+    }
+
+    private static void sleepQuietly(long millis) {
         try {
-            ilinkClient.sendText(toUser, message);
-        } catch (IOException e) {
-            log.debug("failed to send progress hint to user={}", toUser);
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static final class PendingDelivery {
+        private final String id;
+        private List<ModelReply> replies;
+        private int attempts;
+        private long nextAttemptAt;
+        private long contextEpoch;
+
+        private PendingDelivery(String id, List<ModelReply> replies,
+                                int attempts, long nextAttemptAt, long contextEpoch) {
+            this.id = id;
+            this.replies = replies;
+            this.attempts = attempts;
+            this.nextAttemptAt = nextAttemptAt;
+            this.contextEpoch = contextEpoch;
         }
     }
 
@@ -402,7 +871,7 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
 
     private void replyNotSupported(String toUserId) {
         try {
-            ilinkClient.sendText(toUserId, "目前支持文本、图片和语音消息，请发文字、图片或语音给我。");
+            sendStandaloneText(toUserId, "目前支持文本、图片和语音消息，请发文字、图片或语音给我。");
         } catch (IOException e) {
             log.error("failed to send not-supported hint to user={}", toUserId, e);
         }
@@ -413,7 +882,7 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
                 ? "抱歉，AI 服务返回错误：" + detail + "\n请稍后再试。"
                 : "抱歉，处理消息时发生错误，请稍后再试。";
         try {
-            ilinkClient.sendText(toUserId, reply);
+            sendStandaloneText(toUserId, reply);
         } catch (IOException e) {
             log.error("failed to send error fallback to user={}", toUserId, e);
         }
@@ -512,43 +981,6 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
             log.debug("cannot parse file len string: {}", lenStr);
             return 0;
         }
-    }
-
-    private String annotateFileContent(ParseResult fileResult, String userText) {
-        StringBuilder annotated = new StringBuilder();
-        String ext = DocumentService.extractExtension(fileResult.fileName());
-        String typeDesc = fileTypeDescription(ext);
-        boolean isAudio = ext != null && (ext.equals("mp3") || ext.equals("wav") || ext.equals("m4a")
-                || ext.equals("ogg") || ext.equals("flac") || ext.equals("wma") || ext.equals("aac") || ext.equals("opus"));
-
-        annotated.append("【用户上传文件】").append(fileResult.fileName());
-        if (typeDesc != null && !typeDesc.isBlank()) {
-            annotated.append("（").append(typeDesc).append("）");
-        }
-
-        if (fileResult.text() != null && !fileResult.text().isBlank()) {
-            if (isAudio) {
-                annotated.append("\n语音识别结果：\n").append(fileResult.text());
-            } else {
-                annotated.append("\n文档内容：\n").append(fileResult.text());
-            }
-        } else {
-            annotated.append("\n（文件无文字内容）");
-        }
-
-        if (!fileResult.images().isEmpty()) {
-            annotated.append("\n（文档包含 ").append(fileResult.images().size()).append(" 张嵌入图片，已提取并附带在消息中）");
-        }
-
-        if (!isAudio) {
-            annotated.append("\n（文件已自动索引到知识库 \"default\"，后续可用 search_rag 工具搜索文档内容）");
-        }
-
-        if (userText != null && !userText.isBlank()) {
-            annotated.append("\n\n---\n【用户消息】\n").append(userText);
-        }
-
-        return annotated.toString();
     }
 
     private static String fileTypeDescription(String extension) {

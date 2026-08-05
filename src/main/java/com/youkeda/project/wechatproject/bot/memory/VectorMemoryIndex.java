@@ -19,6 +19,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -29,6 +30,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 /**
@@ -47,6 +49,13 @@ public class VectorMemoryIndex {
     private static final Pattern HEADING = Pattern.compile("^#{1,6}\\s+.+$");
     private static final TypeReference<List<Double>> DOUBLE_LIST_TYPE = new TypeReference<>() {
     };
+    private static final Duration QUERY_AUDIT_RETENTION = Duration.ofDays(30);
+    private static final int QUERY_AUDIT_PREVIEW_CHARS = 200;
+    private static final int EXACT_SCAN_THRESHOLD = 500;
+    private static final int LSH_BANDS = 4;
+    private static final int LSH_BITS_PER_BAND = 4;
+    private static final int MAX_APPROXIMATE_CANDIDATES = 2000;
+    private static final Duration EMBEDDING_FAILURE_COOLDOWN = Duration.ofMinutes(5);
 
     private final Path dbPath;
     private final EmbeddingClient embeddingClient;
@@ -55,6 +64,7 @@ public class VectorMemoryIndex {
     private final int topK;
     private final double minScore;
     private final String embeddingModel;
+    private final AtomicLong vectorUnavailableUntil = new AtomicLong();
 
     public VectorMemoryIndex(Path dbPath, EmbeddingClient embeddingClient,
                              int chunkChars, int overlapChars, int topK, double minScore) {
@@ -88,22 +98,36 @@ public class VectorMemoryIndex {
         if (isBlank(userId) || documents == null || documents.isEmpty()) {
             return "";
         }
+        long now = System.currentTimeMillis();
+        if (now < vectorUnavailableUntil.get()) {
+            List<MemoryHit> hits = lexicalSearch(query, documents);
+            logRetrieval(userId, query, hits);
+            return formatHits(hits);
+        }
         try {
             synchronize(userId, documents);
             List<MemoryHit> hits = search(userId, query);
             if (hits.isEmpty()) {
                 hits = lexicalSearch(query, documents);
             }
+            vectorUnavailableUntil.set(0L);
             logRetrieval(userId, query, hits);
             return formatHits(hits);
         } catch (IOException e) {
-            log.warn("memory vector retrieval unavailable for userId={}; falling back to lexical search: {}",
-                    userId, e.getMessage());
+            long cooldownUntil = System.currentTimeMillis() + EMBEDDING_FAILURE_COOLDOWN.toMillis();
+            vectorUnavailableUntil.set(cooldownUntil);
+            log.warn("memory vector retrieval unavailable for userId={}; falling back to lexical search "
+                            + "and opening {}s cooldown: {}",
+                    userId, EMBEDDING_FAILURE_COOLDOWN.toSeconds(), e.getMessage());
             List<MemoryHit> hits = lexicalSearch(query, documents);
             logRetrieval(userId, query, hits);
             return formatHits(hits);
         } catch (SQLException e) {
-            throw new IOException("failed to retrieve memory chunks from SQLite index", e);
+            log.warn("memory SQLite retrieval unavailable for userId={}; falling back to lexical search: {}",
+                    userId, e.getMessage());
+            List<MemoryHit> hits = lexicalSearch(query, documents);
+            logRetrieval(userId, query, hits);
+            return formatHits(hits);
         }
     }
 
@@ -145,10 +169,15 @@ public class VectorMemoryIndex {
                         embedding_model TEXT NOT NULL,
                         dimensions INTEGER NOT NULL,
                         embedding_json TEXT NOT NULL,
+                        lsh_band0 INTEGER,
+                        lsh_band1 INTEGER,
+                        lsh_band2 INTEGER,
+                        lsh_band3 INTEGER,
                         updated_at TEXT NOT NULL,
                         FOREIGN KEY(chunk_id) REFERENCES memory_index_chunks(id) ON DELETE CASCADE
                     )
                     """);
+            ensureEmbeddingLshColumns(conn);
             stmt.execute("""
                     CREATE TABLE IF NOT EXISTS memory_index_queries (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,8 +204,81 @@ public class VectorMemoryIndex {
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_index_sources_user ON memory_index_sources(user_id)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_index_chunks_source ON memory_index_chunks(source_id)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_index_embeddings_model ON memory_index_embeddings(embedding_model)");
+            for (int band = 0; band < LSH_BANDS; band++) {
+                stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_index_embeddings_lsh" + band
+                        + " ON memory_index_embeddings(lsh_band" + band + ")");
+            }
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_index_queries_user ON memory_index_queries(user_id, created_at)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_memory_index_query_hits_query ON memory_index_query_hits(query_id)");
+            pruneOldQueryAudit(conn);
+            backfillLshSignatures(conn);
+        }
+    }
+
+    private void ensureEmbeddingLshColumns(Connection conn) throws SQLException {
+        Set<String> columns = new HashSet<>();
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("PRAGMA table_info(memory_index_embeddings)")) {
+            while (rs.next()) {
+                columns.add(rs.getString("name"));
+            }
+        }
+        try (Statement stmt = conn.createStatement()) {
+            for (int band = 0; band < LSH_BANDS; band++) {
+                String column = "lsh_band" + band;
+                if (!columns.contains(column)) {
+                    stmt.execute("ALTER TABLE memory_index_embeddings ADD COLUMN " + column + " INTEGER");
+                }
+            }
+        }
+    }
+
+    private void backfillLshSignatures(Connection conn) throws SQLException {
+        List<EmbeddingSignature> updates = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT chunk_id, embedding_json FROM memory_index_embeddings
+                WHERE lsh_band0 IS NULL OR lsh_band1 IS NULL OR lsh_band2 IS NULL OR lsh_band3 IS NULL
+                """);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                try {
+                    updates.add(new EmbeddingSignature(rs.getLong("chunk_id"),
+                            lshBands(parseEmbedding(rs.getString("embedding_json")))));
+                } catch (IOException e) {
+                    log.warn("skipping invalid stored embedding for chunk {}", rs.getLong("chunk_id"));
+                }
+            }
+        }
+        if (updates.isEmpty()) {
+            return;
+        }
+        try (PreparedStatement ps = conn.prepareStatement("""
+                UPDATE memory_index_embeddings
+                SET lsh_band0 = ?, lsh_band1 = ?, lsh_band2 = ?, lsh_band3 = ?
+                WHERE chunk_id = ?
+                """)) {
+            for (EmbeddingSignature update : updates) {
+                for (int band = 0; band < LSH_BANDS; band++) {
+                    ps.setInt(band + 1, update.bands()[band]);
+                }
+                ps.setLong(5, update.chunkId());
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+        log.info("backfilled LSH signatures for {} memory embeddings", updates.size());
+    }
+
+    private void pruneOldQueryAudit(Connection conn) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "DELETE FROM memory_index_queries WHERE created_at < ?")) {
+            ps.setString(1, Instant.now().minus(QUERY_AUDIT_RETENTION).toString());
+            int deleted = ps.executeUpdate();
+            if (deleted > 0) {
+                log.info("pruned {} old memory query audit rows", deleted);
+            }
+        } catch (SQLException e) {
+            log.warn("failed to prune memory query audit: {}", e.getMessage());
         }
     }
 
@@ -237,7 +339,8 @@ public class VectorMemoryIndex {
             }
             for (SourceDocument doc : nonEmpty) {
                 StoredSource s = stored.get(doc.sourcePath());
-                if (s == null || !sha256(doc.content()).equals(s.contentHash)) {
+                if (s == null || (doc.mtimeMillis() > 0 && s.mtime() != doc.mtimeMillis())
+                        || (doc.mtimeMillis() <= 0 && !sha256(doc.content()).equals(s.contentHash()))) {
                     return false;
                 }
             }
@@ -316,30 +419,32 @@ public class VectorMemoryIndex {
         }
         double[] queryEmbedding = embeddingClient.embed(query);
         List<MemoryHit> hits = new ArrayList<>();
-        try (Connection conn = connect();
-             PreparedStatement ps = conn.prepareStatement("""
-                     SELECT c.id AS chunk_id, s.source_path, s.source_layer, c.chunk_index,
-                            c.start_line, c.end_line, c.content, e.embedding_json
-                     FROM memory_index_chunks c
-                     JOIN memory_index_sources s ON s.id = c.source_id
-                     JOIN memory_index_embeddings e ON e.chunk_id = c.id
-                     WHERE s.user_id = ?
-                     """)) {
-            ps.setString(1, userId);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    double[] embedding = parseEmbedding(rs.getString("embedding_json"));
-                    double score = cosine(queryEmbedding, embedding);
-                    if (score >= minScore) {
-                        hits.add(new MemoryHit(
-                                rs.getLong("chunk_id"),
-                                rs.getString("source_path"),
-                                rs.getString("source_layer"),
-                                rs.getInt("chunk_index"),
-                                rs.getInt("start_line"),
-                                rs.getInt("end_line"),
-                                score,
-                                rs.getString("content")));
+        int[] queryBands = lshBands(queryEmbedding);
+        try (Connection conn = connect()) {
+            boolean approximate = usesApproximateSearch(conn, userId);
+            try (PreparedStatement ps = prepareSearch(conn, approximate)) {
+                ps.setString(1, userId);
+                if (approximate) {
+                    for (int band = 0; band < LSH_BANDS; band++) {
+                        ps.setInt(band + 2, queryBands[band]);
+                    }
+                    ps.setInt(6, MAX_APPROXIMATE_CANDIDATES);
+                }
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        double[] embedding = parseEmbedding(rs.getString("embedding_json"));
+                        double score = cosine(queryEmbedding, embedding);
+                        if (score >= minScore) {
+                            hits.add(new MemoryHit(
+                                    rs.getLong("chunk_id"),
+                                    rs.getString("source_path"),
+                                    rs.getString("source_layer"),
+                                    rs.getInt("chunk_index"),
+                                    rs.getInt("start_line"),
+                                    rs.getInt("end_line"),
+                                    score,
+                                    rs.getString("content")));
+                        }
                     }
                 }
             }
@@ -351,6 +456,43 @@ public class VectorMemoryIndex {
             return new ArrayList<>(hits.subList(0, topK));
         }
         return hits;
+    }
+
+    private PreparedStatement prepareSearch(Connection conn, boolean approximate) throws SQLException {
+        if (!approximate) {
+            return conn.prepareStatement("""
+                    SELECT c.id AS chunk_id, s.source_path, s.source_layer, c.chunk_index,
+                           c.start_line, c.end_line, c.content, e.embedding_json
+                    FROM memory_index_chunks c
+                    JOIN memory_index_sources s ON s.id = c.source_id
+                    JOIN memory_index_embeddings e ON e.chunk_id = c.id
+                    WHERE s.user_id = ?
+                    """);
+        }
+        return conn.prepareStatement("""
+                SELECT c.id AS chunk_id, s.source_path, s.source_layer, c.chunk_index,
+                       c.start_line, c.end_line, c.content, e.embedding_json
+                FROM memory_index_chunks c
+                JOIN memory_index_sources s ON s.id = c.source_id
+                JOIN memory_index_embeddings e ON e.chunk_id = c.id
+                WHERE s.user_id = ? AND (
+                    e.lsh_band0 = ? OR e.lsh_band1 = ? OR e.lsh_band2 = ? OR e.lsh_band3 = ?
+                )
+                LIMIT ?
+                """);
+    }
+
+    private boolean usesApproximateSearch(Connection conn, String userId) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("""
+                SELECT COUNT(*) FROM memory_index_chunks c
+                JOIN memory_index_sources s ON s.id = c.source_id
+                WHERE s.user_id = ?
+                """)) {
+            ps.setString(1, userId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() && rs.getInt(1) > EXACT_SCAN_THRESHOLD;
+            }
+        }
     }
 
     private List<MemoryHit> lexicalSearch(String query, List<SourceDocument> documents) {
@@ -419,7 +561,8 @@ public class VectorMemoryIndex {
                         """)) {
                     ps.setString(1, userId);
                     ps.setString(2, sha256(query));
-                    ps.setString(3, query);
+                    ps.setString(3, query.length() <= QUERY_AUDIT_PREVIEW_CHARS
+                            ? query : query.substring(0, QUERY_AUDIT_PREVIEW_CHARS));
                     ps.setInt(4, topK);
                     ps.setDouble(5, minScore);
                     ps.setString(6, Instant.now().toString());
@@ -504,12 +647,17 @@ public class VectorMemoryIndex {
                 """;
         String embeddingSql = """
                 INSERT INTO memory_index_embeddings (
-                    chunk_id, embedding_model, dimensions, embedding_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    chunk_id, embedding_model, dimensions, embedding_json,
+                    lsh_band0, lsh_band1, lsh_band2, lsh_band3, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chunk_id) DO UPDATE SET
                     embedding_model = excluded.embedding_model,
                     dimensions = excluded.dimensions,
                     embedding_json = excluded.embedding_json,
+                    lsh_band0 = excluded.lsh_band0,
+                    lsh_band1 = excluded.lsh_band1,
+                    lsh_band2 = excluded.lsh_band2,
+                    lsh_band3 = excluded.lsh_band3,
                     updated_at = excluded.updated_at
                 """;
         try (PreparedStatement chunkPs = conn.prepareStatement(chunkSql);
@@ -538,7 +686,11 @@ public class VectorMemoryIndex {
                 embeddingPs.setString(2, embeddingModel);
                 embeddingPs.setInt(3, embedding.length);
                 embeddingPs.setString(4, serializeEmbedding(embedding));
-                embeddingPs.setString(5, Instant.now().toString());
+                int[] bands = lshBands(embedding);
+                for (int band = 0; band < LSH_BANDS; band++) {
+                    embeddingPs.setInt(5 + band, bands[band]);
+                }
+                embeddingPs.setString(9, Instant.now().toString());
                 embeddingPs.addBatch();
             }
             embeddingPs.executeBatch();
@@ -672,6 +824,33 @@ public class VectorMemoryIndex {
         return dot / (Math.sqrt(normA) * Math.sqrt(normB));
     }
 
+    static int[] lshBands(double[] embedding) {
+        int[] bands = new int[LSH_BANDS];
+        if (embedding == null || embedding.length == 0) {
+            return bands;
+        }
+        for (int bit = 0; bit < LSH_BANDS * LSH_BITS_PER_BAND; bit++) {
+            double projection = 0.0d;
+            for (int dimension = 0; dimension < embedding.length; dimension++) {
+                long mixed = mix64((((long) bit + 1) << 32) ^ (dimension + 1L));
+                projection += ((mixed & 1L) == 0L ? 1.0d : -1.0d) * embedding[dimension];
+            }
+            if (projection >= 0.0d) {
+                int band = bit / LSH_BITS_PER_BAND;
+                bands[band] |= 1 << (bit % LSH_BITS_PER_BAND);
+            }
+        }
+        return bands;
+    }
+
+    private static long mix64(long value) {
+        value ^= value >>> 30;
+        value *= 0xbf58476d1ce4e5b9L;
+        value ^= value >>> 27;
+        value *= 0x94d049bb133111ebL;
+        return value ^ (value >>> 31);
+    }
+
     private String sha256(String text) throws IOException {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -725,6 +904,9 @@ public class VectorMemoryIndex {
     }
 
     private record StoredSource(String contentHash, long mtime) {
+    }
+
+    private record EmbeddingSignature(long chunkId, int[] bands) {
     }
 
     private record MemoryHit(long chunkId, String sourcePath, String layer, int chunkIndex,

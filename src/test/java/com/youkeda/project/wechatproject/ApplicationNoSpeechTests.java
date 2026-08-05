@@ -5,7 +5,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 
 @SpringBootTest(properties = {
         "ilink.auto-login=false",
-        "agent.speech.enabled=false"
+        "agent.speech.enabled=false",
+        "agent.tools.automation.heartbeat-enabled=false"
 })
 class ApplicationNoSpeechTests {
 

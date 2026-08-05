@@ -36,7 +36,9 @@ public class SpeechAgent implements AgentUnit {
                 "speech-generation",
                 "Converts text into audio with configurable voice settings.",
                 List.of("tts", "narration", "audio"),
-                "voice"
+                "voice",
+                List.of("语音", "朗读", "念给我听", "读给我听", "讲给我听", "说出来", "读出来",
+                        "帮我读", "帮我念", "播报", "念一下", "tts", "朗诵")
         );
     }
 
