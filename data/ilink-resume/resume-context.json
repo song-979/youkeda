@@ -1,18 +1,18 @@
 {
   "loginContext" : {
-    "botToken" : "5a832854f336@im.bot:0600002ea43446318095ebdb510c6ef5c1ea78",
-    "userId" : "o9cq807d5yyDrD5d1Ul5MpjU_mvc@im.wechat",
-    "botId" : "5a832854f336@im.bot",
+    "botToken" : "b9d6573a0012@im.bot:0600005ddaf6abad29435d9b878fd3f2448b1f",
+    "userId" : "o9cq80_BSpn6qXAXDGKF_wuOUODc@im.wechat",
+    "botId" : "b9d6573a0012@im.bot",
     "baseUrl" : "https://ilinkai.weixin.qq.com"
   },
-  "updatesCursor" : "ChAIBBCPzdHp+jMYkqaq6fozEjo1YTgzMjg1NGYzMzZAaW0uYm90OjA2MDAwMDJlYTQzNDQ2MzE4MDk1ZWJkYjUxMGM2ZWY1YzFlYTc4",
+  "updatesCursor" : "ChAIARD4i8H8/DMYteO+/PwzEjpiOWQ2NTczYTAwMTJAaW0uYm90OjA2MDAwMDVkZGFmNmFiYWQyOTQzNWQ5Yjg3OGZkM2YyNDQ4YjFm",
   "conversationContexts" : {
-    "o9cq807d5yyDrD5d1Ul5MpjU_mvc@im.wechat" : {
-      "botId" : "5a832854f336@im.bot",
-      "userId" : "o9cq807d5yyDrD5d1Ul5MpjU_mvc@im.wechat",
-      "latestContextToken" : "AARzJWAFAAABAAAAAADSGU69GlU8j/6UyMdpaiAAAAB+9905Q6UiugPBawU3n3cyzQX+LkN8ofRzsCZYN0mt7iofWX6kL9o4S0MN7r9ZRwOWiF9JEyI05gHP8DnL2NiSChNGMzNH",
-      "sourceMessageId" : 7488163577267982728,
-      "sourceMessageTime" : 1785317320080
+    "o9cq80_BSpn6qXAXDGKF_wuOUODc@im.wechat" : {
+      "botId" : "6f5e0b518ca2@im.bot",
+      "userId" : "o9cq80_BSpn6qXAXDGKF_wuOUODc@im.wechat",
+      "latestContextToken" : "AARzJWAFAAABAAAAAADnAul7FCAQ90xbrJFyaiAAAAB+9905Q6UiugPBawU3n3cyzQX+LkN8ofRzsCZYN0mt7l5skUOSZ+EBYscd/v/86QCVNxaGuoybKsxD67Gm0Du1Jy4s4YXs",
+      "sourceMessageId" : 7490579378833883016,
+      "sourceMessageTime" : 1785893292051
     }
   }
 }

@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>系统控制台</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #f5f7fb;
+            --panel: #ffffff;
+            --panel-soft: #f8fafc;
+            --line: #d9e2ef;
+            --text: #142033;
+            --muted: #66758a;
+            --ok: #07875a;
+            --warn: #b7791f;
+            --error: #c2410c;
+            --off: #64748b;
+            --primary: #1759ff;
+            --shadow: 0 14px 36px rgba(15, 23, 42, 0.08);
+            --radius: 8px;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: var(--bg);
+            color: var(--text);
+        }
+
+        button {
+            font: inherit;
+        }
+
+        .page {
+            width: min(1440px, calc(100% - 24px));
+            margin: 0 auto;
+            padding: 14px 0 24px;
+        }
+
+        .topbar,
+        .panel,
+        .status-card {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 14px 16px;
+            margin-bottom: 10px;
+        }
+
+        .eyebrow {
+            margin: 0 0 3px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        h1,
+        h2,
+        h3,
+        p {
+            margin: 0;
+        }
+
+        h1 {
+            font-size: 21px;
+        }
+
+        h2 {
+            font-size: 16px;
+        }
+
+        .actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+
+        .pill,
+        .button {
+            height: 36px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 10px;
+            border-radius: var(--radius);
+            border: 1px solid var(--line);
+            background: var(--panel-soft);
+            color: var(--text);
+            text-decoration: none;
+            font-size: 13px;
+        }
+
+        .button {
+            cursor: pointer;
+        }
+
+        .button.primary {
+            border-color: var(--primary);
+            background: var(--primary);
+            color: #ffffff;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(12, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .panel {
+            padding: 12px;
+        }
+
+        .span-4 {
+            grid-column: span 4;
+        }
+
+        .span-5 {
+            grid-column: span 5;
+        }
+
+        .span-6 {
+            grid-column: span 6;
+        }
+
+        .span-7 {
+            grid-column: span 7;
+        }
+
+        .span-8 {
+            grid-column: span 8;
+        }
+
+        .span-12 {
+            grid-column: span 12;
+        }
+
+        .hero-status {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr);
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 999px;
+            background: var(--off);
+            box-shadow: 0 0 0 5px rgba(100, 116, 139, 0.14);
+        }
+
+        [data-state="ok"] .status-dot,
+        .state-ok {
+            background: var(--ok);
+        }
+
+        [data-state="warning"] .status-dot,
+        .state-warning {
+            background: var(--warn);
+        }
+
+        [data-state="error"] .status-dot,
+        .state-error {
+            background: var(--error);
+        }
+
+        [data-state="off"] .status-dot,
+        .state-off {
+            background: var(--off);
+        }
+
+        .hero-status strong {
+            display: block;
+            margin-bottom: 3px;
+            font-size: 16px;
+        }
+
+        .muted {
+            color: var(--muted);
+            line-height: 1.45;
+            font-size: 13px;
+        }
+
+        .section-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 9px;
+        }
+
+        .list {
+            display: grid;
+            gap: 7px;
+        }
+
+        #servicesList,
+        #toolsList {
+            max-height: 318px;
+            overflow-y: auto;
+            padding-right: 3px;
+        }
+
+        .status-card {
+            display: grid;
+            gap: 5px;
+            padding: 9px 10px;
+            box-shadow: none;
+            background: var(--panel-soft);
+        }
+
+        .card-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .card-title {
+            display: flex;
+            align-items: center;
+            min-width: 0;
+            gap: 7px;
+            font-weight: 650;
+            font-size: 13px;
+        }
+
+        .mini-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            flex: 0 0 auto;
+        }
+
+        .label {
+            flex: 0 0 auto;
+            color: var(--muted);
+            font-size: 11px;
+        }
+
+        .status-card p {
+            color: var(--muted);
+            line-height: 1.4;
+            font-size: 12px;
+        }
+
+        .facts {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 7px;
+        }
+
+        .fact {
+            padding: 9px 10px;
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            background: var(--panel-soft);
+        }
+
+        .fact span {
+            display: block;
+            margin-bottom: 3px;
+            color: var(--muted);
+            font-size: 11px;
+        }
+
+        .fact strong {
+            overflow-wrap: anywhere;
+        }
+
+        .progress {
+            height: 6px;
+            margin-top: 8px;
+            border-radius: 999px;
+            background: #e2e8f0;
+            overflow: hidden;
+        }
+
+        .progress span {
+            display: block;
+            height: 100%;
+            width: 0%;
+            background: var(--primary);
+        }
+
+        .table {
+            display: grid;
+            gap: 4px;
+        }
+
+        .chat-list {
+            display: grid;
+            gap: 7px;
+            max-height: 320px;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+
+        .chat-entry {
+            display: grid;
+            gap: 5px;
+            padding: 9px 10px;
+            border: 1px solid var(--line);
+            border-radius: var(--radius);
+            background: var(--panel-soft);
+        }
+
+        .chat-entry.incoming {
+            border-left: 4px solid var(--primary);
+        }
+
+        .chat-entry.outgoing {
+            border-left: 4px solid var(--ok);
+        }
+
+        .chat-entry-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            color: var(--muted);
+            font-size: 11px;
+        }
+
+        .chat-entry strong {
+            color: var(--text);
+            font-size: 12px;
+        }
+
+        .chat-entry pre {
+            margin: 0;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            color: var(--text);
+            font: inherit;
+            line-height: 1.42;
+            font-size: 12px;
+        }
+
+        .row {
+            display: grid;
+            grid-template-columns: 130px minmax(0, 1fr) 82px;
+            gap: 8px;
+            align-items: start;
+            padding: 7px 0;
+            border-bottom: 1px solid var(--line);
+            font-size: 12px;
+        }
+
+        .row:last-child {
+            border-bottom: 0;
+        }
+
+        .row strong,
+        .row span {
+            overflow-wrap: anywhere;
+            white-space: pre-line;
+        }
+
+        .empty,
+        .error-box {
+            padding: 10px;
+            border: 1px dashed var(--line);
+            border-radius: var(--radius);
+            background: var(--panel-soft);
+            color: var(--muted);
+            line-height: 1.45;
+            font-size: 12px;
+        }
+
+        @media (max-width: 980px) {
+            .span-4,
+            .span-5,
+            .span-6,
+            .span-7,
+            .span-8 {
+                grid-column: span 12;
+            }
+
+            .facts {
+                grid-template-columns: 1fr;
+            }
+
+            .row {
+                grid-template-columns: 1fr;
+                gap: 5px;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .page {
+                width: min(100% - 16px, 1280px);
+                padding-top: 8px;
+            }
+
+            .topbar {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .actions {
+                justify-content: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+<main class="page">
+    <header class="topbar">
+        <div>
+            <p class="eyebrow">运行控制台</p>
+            <h1>系统现在怎么样</h1>
+        </div>
+        <div class="actions">
+            <span class="pill" id="checkedAt">等待刷新</span>
+            <a class="button" href="/setup">配置向导</a>
+            <a class="button" href="/ilink/qrcode">二维码</a>
+            <button class="button primary" id="refreshButton" type="button">刷新</button>
+        </div>
+    </header>
+
+    <section class="grid">
+        <div class="panel span-8">
+            <div class="hero-status" id="heroStatus" data-state="off">
+                <span class="status-dot"></span>
+                <div>
+                    <strong id="heroLabel">正在读取状态</strong>
+                    <p class="muted" id="heroMessage">如果后端已启动，这里会显示系统整体情况。</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel span-4">
+            <div class="section-head">
+                <h2>运行资源</h2>
+                <span class="label" id="uptime">--</span>
+            </div>
+            <div class="facts" id="runtimeFacts"></div>
+            <div class="progress" aria-label="内存使用率"><span id="memoryBar"></span></div>
+        </div>
+
+        <section class="panel span-4">
+            <div class="section-head">
+                <h2>核心连接</h2>
+                <span class="label">用户关心的主流程</span>
+            </div>
+            <div class="list" id="servicesList"></div>
+        </section>
+
+        <section class="panel span-4">
+            <div class="section-head">
+                <h2>已加载工具</h2>
+                <span class="label" id="toolCount">--</span>
+            </div>
+            <div class="list" id="toolsList"></div>
+        </section>
+
+        <section class="panel span-4">
+            <div class="section-head">
+                <h2>数据文件</h2>
+                <span class="label">只读检查</span>
+            </div>
+            <div class="table" id="filesTable"></div>
+        </section>
+
+        <section class="panel span-7">
+            <div class="section-head">
+                <h2>聊天记录</h2>
+                <span class="label" id="chatCount">最近 0 条</span>
+            </div>
+            <div class="chat-list" id="chatList"></div>
+        </section>
+
+        <section class="panel span-5">
+            <div class="section-head">
+                <h2>配置检查</h2>
+                <span class="label">密钥已隐藏</span>
+            </div>
+            <div class="table" id="configTable"></div>
+        </section>
+    </section>
+</main>
+
+<script>
+const endpoints = {
+    status: "/api/console/status"
+};
+
+const stateLabels = {
+    ok: "正常",
+    warning: "需查看",
+    error: "异常",
+    off: "已关闭"
+};
+
+document.getElementById("refreshButton").addEventListener("click", loadStatus);
+window.addEventListener("load", () => {
+    loadStatus();
+    window.setInterval(loadStatus, 5000);
+});
+
+async function loadStatus() {
+    try {
+        const response = await fetch(endpoints.status, { cache: "no-store" });
+        if (!response.ok) {
+            throw new Error("HTTP " + response.status);
+        }
+        render(await response.json());
+    } catch (error) {
+        renderFailure();
+    }
+}
+
+function render(data) {
+    const summary = data.summary || {};
+    const hero = document.getElementById("heroStatus");
+    hero.dataset.state = summary.state || "warning";
+    document.getElementById("heroLabel").textContent = summary.label || "状态未知";
+    document.getElementById("heroMessage").textContent = summary.message || "";
+    document.getElementById("checkedAt").textContent = "检查时间：" + (summary.checkedAt || "--");
+    document.getElementById("uptime").textContent = "已运行 " + (summary.uptime || "--");
+
+    renderRuntime(data.runtime || {});
+    renderCards("servicesList", data.services || []);
+    renderCards("toolsList", data.tools || []);
+    document.getElementById("toolCount").textContent = (data.tools || []).length + " 个";
+    renderChatLogs(data.chatLogs || []);
+    renderRows("filesTable", data.dataFiles || [], ["name", "path", "label"], item =>
+        `${item.detail || ""}${item.size ? " · " + item.size : ""}${item.modifiedAt ? " · " + item.modifiedAt : ""}`
+    );
+    renderRows("configTable", data.configuration || [], ["name", "property", "label"], item => item.value || "");
+}
+
+function renderRuntime(runtime) {
+    const facts = [
+        ["端口", runtime.port || "--"],
+        ["Java", runtime.java || "--"],
+        ["进程", runtime.pid || "--"],
+        ["线程", `${runtime.threads || 0} 个`],
+        ["内存", `${runtime.heapUsed || "--"} / ${runtime.heapMax || "--"}`],
+        ["Bean", `${runtime.beanCount || 0} 个`]
+    ];
+    const box = document.getElementById("runtimeFacts");
+    box.replaceChildren();
+    facts.forEach(([label, value]) => {
+        const item = document.createElement("div");
+        item.className = "fact";
+        item.innerHTML = `<span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>`;
+        box.append(item);
+    });
+    const memoryBar = document.getElementById("memoryBar");
+    memoryBar.style.width = Math.max(0, Math.min(100, runtime.memoryUsedPercent || 0)) + "%";
+}
+
+function renderCards(targetId, items) {
+    const target = document.getElementById(targetId);
+    target.replaceChildren();
+    if (!items.length) {
+        target.append(empty("暂无数据"));
+        return;
+    }
+    items.forEach(item => {
+        const card = document.createElement("article");
+        card.className = "status-card";
+        card.innerHTML = `
+            <div class="card-head">
+                <div class="card-title">
+                    <span class="mini-dot state-${escapeHtml(item.state || "off")}"></span>
+                    <span>${escapeHtml(item.name || "未命名")}</span>
+                </div>
+                <span class="label">${escapeHtml(item.label || stateLabels[item.state] || "未知")}</span>
+            </div>
+            <p>${escapeHtml(item.detail || item.category || "")}</p>
+        `;
+        target.append(card);
+    });
+}
+
+function renderChatLogs(items) {
+    const target = document.getElementById("chatList");
+    const count = document.getElementById("chatCount");
+    count.textContent = `最近 ${items.length} 条`;
+    target.replaceChildren();
+    if (!items.length) {
+        target.append(empty("暂无聊天记录。收到或发出消息后，这里会自动出现。"));
+        return;
+    }
+    items.forEach(item => {
+        const entry = document.createElement("article");
+        entry.className = `chat-entry ${item.direction === "incoming" ? "incoming" : "outgoing"}`;
+
+        const head = document.createElement("div");
+        head.className = "chat-entry-head";
+        const left = document.createElement("span");
+        left.textContent = `${directionLabel(item.direction)} · ${item.kind || "消息"} · ${item.status || ""}`;
+        const right = document.createElement("span");
+        right.textContent = item.time || "";
+        head.append(left, right);
+
+        const user = document.createElement("strong");
+        user.textContent = item.userId || "未知用户";
+
+        const content = document.createElement("pre");
+        content.textContent = item.content || "无文本内容";
+
+        entry.append(head, user, content);
+        target.append(entry);
+    });
+}
+
+function directionLabel(direction) {
+    return direction === "incoming" ? "用户发来" : "助手发出";
+}
+
+function renderRows(targetId, items, columns, detailFn) {
+    const target = document.getElementById(targetId);
+    target.replaceChildren();
+    if (!items.length) {
+        target.append(empty("暂无数据"));
+        return;
+    }
+    items.forEach(item => {
+        const row = document.createElement("div");
+        row.className = "row";
+        const first = document.createElement("strong");
+        first.textContent = item[columns[0]] || "";
+        const second = document.createElement("span");
+        second.textContent = item[columns[1]] || detailFn(item) || "";
+        const third = document.createElement("span");
+        third.textContent = item[columns[2]] || "";
+        third.className = "label";
+        row.append(first, second, third);
+        const detail = detailFn(item);
+        if (detail && detail !== second.textContent) {
+            second.textContent = `${second.textContent}\n${detail}`;
+        }
+        target.append(row);
+    });
+}
+
+function renderFailure() {
+    document.getElementById("heroStatus").dataset.state = "error";
+    document.getElementById("heroLabel").textContent = "控制台未连上后端";
+    document.getElementById("heroMessage").textContent = "请确认 Spring Boot 主进程正在运行，然后刷新页面。";
+    document.getElementById("checkedAt").textContent = "检查失败";
+}
+
+function empty(text) {
+    const node = document.createElement("div");
+    node.className = "empty";
+    node.textContent = text;
+    return node;
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+</script>
+</body>
+</html>

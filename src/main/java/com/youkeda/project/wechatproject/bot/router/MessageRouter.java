@@ -21,6 +21,7 @@ import com.youkeda.project.wechatproject.bot.service.VoiceService.VoiceProfile;
 import com.youkeda.project.wechatproject.bot.tool.travel.AmapAroundSearchTools;
 import com.youkeda.project.wechatproject.bot.tool.travel.AmapDirectionTools;
 import com.youkeda.project.wechatproject.bot.tool.travel.DiDiTaxiTools;
+import com.youkeda.project.wechatproject.bot.tool.browser.BrowserTools;
 import com.youkeda.project.wechatproject.bot.tool.chat.LocalFileTools;
 import com.youkeda.project.wechatproject.bot.tool.chat.RagTools;
 import com.youkeda.project.wechatproject.bot.tool.chat.ScheduledTaskExecutionRequest;
@@ -55,7 +56,7 @@ public class MessageRouter {
     private static final Pattern LOCAL_FILE_MARKER = Pattern.compile(
             "\\[LOCAL_FILE:(.+?)]");
 
-    private final ConcurrentHashMap<String, ReentrantLock> userLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, UserLock> userLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> userSimpleMode = new ConcurrentHashMap<>();
     private final OrchestratorAgent orchestrator;
     private final AgentRegistry registry;
@@ -66,11 +67,21 @@ public class MessageRouter {
     private final boolean clarificationEnabled;
     private final boolean reflectionEnabled;
     private final SimpleModeRouter simpleModeRouter;
+    private final IntentRouter intentRouter;
 
     public MessageRouter(OrchestratorAgent orchestrator, AgentRegistry registry, ConversationMemory memory,
                          VoiceCatalog voiceCatalog, DocumentService documentService,
                          OrchestratorProperties orchestratorProperties,
                          SimpleModeRouter simpleModeRouter) {
+        this(orchestrator, registry, memory, voiceCatalog, documentService, orchestratorProperties,
+                simpleModeRouter, null);
+    }
+
+    public MessageRouter(OrchestratorAgent orchestrator, AgentRegistry registry, ConversationMemory memory,
+                         VoiceCatalog voiceCatalog, DocumentService documentService,
+                         OrchestratorProperties orchestratorProperties,
+                         SimpleModeRouter simpleModeRouter,
+                         IntentRouter intentRouter) {
         this.orchestrator = orchestrator;
         this.registry = registry;
         this.memory = memory;
@@ -80,14 +91,20 @@ public class MessageRouter {
         this.clarificationEnabled = orchestratorProperties.isClarificationEnabled();
         this.reflectionEnabled = orchestratorProperties.isReflectionEnabled();
         this.simpleModeRouter = simpleModeRouter;
+        this.intentRouter = intentRouter;
     }
 
     public ModelReply route(String userId, String text, List<String> imageBase64Urls) throws IOException {
-        ReentrantLock lock = userLocks.computeIfAbsent(userId, k -> new ReentrantLock());
-        lock.lock();
+        // Fair lock: with async message handling (virtual threads) several worker threads
+        // can arrive concurrently; fairness keeps replies roughly in arrival order.
+        UserLock lock = acquireUserLock(userId);
         DiDiTaxiTools.setCurrentUser(userId);
         RagTools.setCurrentUser(userId);
+        BrowserTools.setCurrentUser(userId);
         try {
+            // A file prepared by an earlier turn must not leak into this response.
+            // Files created during this turn are prepared later by CHAT tools.
+            LocalFileTools.getAndClearPreparedFile();
             // Mode toggle commands
             if (text != null && text.trim().equals("/easy")) {
                 userSimpleMode.put(userId, true);
@@ -139,6 +156,11 @@ public class MessageRouter {
                 imageMemory.summary());
 
         OrchestrationResult result = specialCasePlan(request);
+        if (result == null && intentRouter != null) {
+            // L1/L2 lightweight routing: chitchat and unambiguous single-domain requests
+            // skip the plan LLM call entirely.
+            result = intentRouter.tryDirectRoute(request);
+        }
         if (result == null) {
             result = orchestrator.plan(request);
         }
@@ -214,7 +236,7 @@ public class MessageRouter {
                 }
             }
 
-            if (!reflectionEnabled) {
+            if (!reflectionEnabled || result.skipReflection()) {
                 break;
             }
 
@@ -247,15 +269,21 @@ public class MessageRouter {
         } finally {
             DiDiTaxiTools.clearCurrentUser();
             RagTools.clearCurrentUser();
+            BrowserTools.clearCurrentUser();
             UserMessageTool.clear();
-            lock.unlock();
+            releaseUserLock(userId, lock);
         }
     }
 
     public ModelReply routeScheduledTask(ScheduledTaskExecutionRequest scheduledRequest) throws IOException {
         String userId = scheduledRequest.recipientId();
-        ReentrantLock lock = userLocks.computeIfAbsent(userId, k -> new ReentrantLock());
-        lock.lock();
+        UserLock lock = acquireUserLock(userId);
+        // Scheduled tasks run on scheduler threads, not message threads — the per-user
+        // tool context must be installed explicitly here or RAG/DiDi/automation tools
+        // would see no current user.
+        DiDiTaxiTools.setCurrentUser(userId);
+        RagTools.setCurrentUser(userId);
+        BrowserTools.setCurrentUser(userId);
         try {
             LocalFileTools.getAndClearPreparedFile();
             String text = scheduledTaskPrompt(scheduledRequest);
@@ -325,8 +353,66 @@ public class MessageRouter {
 
             return buildFinalReply(result);
         } finally {
+            DiDiTaxiTools.clearCurrentUser();
+            RagTools.clearCurrentUser();
+            BrowserTools.clearCurrentUser();
             UserMessageTool.clear();
-            lock.unlock();
+            releaseUserLock(userId, lock);
+        }
+    }
+
+    private UserLock acquireUserLock(String userId) {
+        String lockKey = lockKey(userId);
+        UserLock userLock = userLocks.compute(lockKey, (key, existing) -> {
+            UserLock lock = existing != null ? existing : new UserLock();
+            lock.retain();
+            return lock;
+        });
+        userLock.lock();
+        return userLock;
+    }
+
+    private void releaseUserLock(String userId, UserLock userLock) {
+        userLock.unlock();
+        userLocks.computeIfPresent(lockKey(userId), (key, existing) -> {
+            if (existing != userLock) {
+                return existing;
+            }
+            return userLock.release() == 0 ? null : userLock;
+        });
+    }
+
+    private static String lockKey(String userId) {
+        return userId == null || userId.isBlank() ? "anonymous" : userId;
+    }
+
+    int activeUserLockCount() {
+        return userLocks.size();
+    }
+
+    /**
+     * Tracks active and queued requests for a user. Retaining the holder before
+     * waiting on its lock prevents a queued request from being split onto a new
+     * lock while the preceding request is releasing it.
+     */
+    private static final class UserLock {
+        private final ReentrantLock delegate = new ReentrantLock(true);
+        private int references;
+
+        void retain() {
+            references++;
+        }
+
+        int release() {
+            return --references;
+        }
+
+        void lock() {
+            delegate.lock();
+        }
+
+        void unlock() {
+            delegate.unlock();
         }
     }
 
@@ -629,11 +715,41 @@ public class MessageRouter {
         return ImageMemory.of(imageUrls, memory.getLatestImageSummary(userId));
     }
 
+    /**
+     * Paths embedded in LLM output markers (e.g. [MOTOU_GIF:path]) must stay inside
+     * well-known writable roots: the application directory, the user home, or the
+     * system temp dir. Anything else is refused so a crafted model response cannot
+     * make the bot read and exfiltrate arbitrary local files.
+     */
+    private static boolean isAllowedOutboundPath(String rawPath) {
+        if (rawPath == null || rawPath.isBlank()) {
+            return false;
+        }
+        try {
+            Path path = Path.of(rawPath).toAbsolutePath().normalize();
+            List<Path> allowedRoots = List.of(
+                    Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize(),
+                    Path.of(System.getProperty("user.home")).toAbsolutePath().normalize(),
+                    Path.of(System.getProperty("java.io.tmpdir")).toAbsolutePath().normalize());
+            for (Path root : allowedRoots) {
+                if (path.startsWith(root)) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private ModelReply buildFinalReply(OrchestrationResult result) {
         TaskScratchpad scratchpad = result.scratchpad();
         String textReply = scratchpad.lastSuccessfulChatText();
         if (textReply == null || textReply.isBlank()) {
             textReply = result.finalReply() != null ? result.finalReply().getTextContent() : null;
+        }
+        if (textReply == null || textReply.isBlank()) {
+            textReply = scratchpad.lastSuccessfulNonMediaText();
         }
 
         ModelReply.FilePayload filePayload = null;
@@ -661,13 +777,19 @@ public class MessageRouter {
             Matcher motouMatcher = MOTOU_GIF_MARKER.matcher(textReply);
             if (motouMatcher.find()) {
                 String gifPath = motouMatcher.group(1).trim();
-                try {
-                    byte[] gifBytes = Files.readAllBytes(Path.of(gifPath));
-                    filePayload = new ModelReply.FilePayload(gifBytes, "motou.gif");
-                    textReply = motouMatcher.replaceFirst("").trim();
-                    log.info("loaded MOTOU_GIF from path={}, size={} bytes, will send as file", gifPath, gifBytes.length);
-                } catch (IOException e) {
-                    log.error("failed to read MOTOU_GIF from path={}", gifPath, e);
+                // The marker path originates from LLM output — validate it against a
+                // whitelist of writable roots before reading anything from disk.
+                if (!isAllowedOutboundPath(gifPath)) {
+                    log.warn("refusing to read MOTOU_GIF outside allowed roots: {}", gifPath);
+                } else {
+                    try {
+                        byte[] gifBytes = Files.readAllBytes(Path.of(gifPath));
+                        filePayload = new ModelReply.FilePayload(gifBytes, "motou.gif");
+                        textReply = motouMatcher.replaceFirst("").trim();
+                        log.info("loaded MOTOU_GIF from path={}, size={} bytes, will send as file", gifPath, gifBytes.length);
+                    } catch (IOException e) {
+                        log.error("failed to read MOTOU_GIF from path={}", gifPath, e);
+                    }
                 }
             }
         }

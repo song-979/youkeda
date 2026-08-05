@@ -8,6 +8,7 @@ import com.github.wechat.ilink.sdk.core.model.TextItem;
 import com.github.wechat.ilink.sdk.core.model.VoiceItem;
 import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
 import com.youkeda.project.wechatproject.bot.memory.RagStore;
+import com.youkeda.project.wechatproject.bot.monitor.ChatLogRecorder;
 import com.youkeda.project.wechatproject.bot.service.BotService.MessageBridge;
 import com.youkeda.project.wechatproject.bot.service.DocumentService;
 import com.youkeda.project.wechatproject.bot.service.DocumentService.ParseResult;
@@ -19,6 +20,7 @@ import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
 
 import javax.imageio.IIOImage;
@@ -37,9 +39,16 @@ import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
-public class MessageHandler implements OnMessageListener, InitializingBean {
+public class MessageHandler implements OnMessageListener, InitializingBean, DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(MessageHandler.class);
 
@@ -51,6 +60,7 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     private static final int MAX_IMAGE_DIMENSION = 1024;
     private static final float JPEG_QUALITY = 0.8f;
     private static final long MAX_FILE_SIZE = 10 * 1024 * 1024;
+    private static final int MAX_QUEUED_MESSAGES = 100;
 
     private final ILinkClient ilinkClient;
     private final MessageBridge messageBridge;
@@ -60,6 +70,13 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     private final DocumentService documentService;
     private final AutomationRuntime automationRuntime;
     private final RagStore ragStore;
+    private final ChatLogRecorder chatLogRecorder;
+    private final ExecutorService messageExecutor = new ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(MAX_QUEUED_MESSAGES),
+            Thread.ofVirtual().name("message-handler-", 0).factory(),
+            new ThreadPoolExecutor.AbortPolicy());
+    private final AtomicBoolean overloadNoticeSent = new AtomicBoolean();
 
     public MessageHandler(ILinkClient ilinkClient,
                           MessageBridge messageBridge,
@@ -69,6 +86,19 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
                           DocumentService documentService,
                           AutomationRuntime automationRuntime,
                           RagStore ragStore) {
+        this(ilinkClient, messageBridge, router, sttClient, audioConverter, documentService,
+                automationRuntime, ragStore, null);
+    }
+
+    public MessageHandler(ILinkClient ilinkClient,
+                          MessageBridge messageBridge,
+                          MessageRouter router,
+                          SpeechToTextClient sttClient,
+                          AudioConverter audioConverter,
+                          DocumentService documentService,
+                          AutomationRuntime automationRuntime,
+                          RagStore ragStore,
+                          ChatLogRecorder chatLogRecorder) {
         this.ilinkClient = ilinkClient;
         this.messageBridge = messageBridge;
         this.router = router;
@@ -77,6 +107,7 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         this.documentService = documentService;
         this.automationRuntime = automationRuntime;
         this.ragStore = ragStore;
+        this.chatLogRecorder = chatLogRecorder;
     }
 
     @Override
@@ -87,8 +118,33 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
 
     @Override
     public void onMessages(List<WeixinMessage> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return;
+        }
         for (WeixinMessage msg : messages) {
-            handleMessage(msg);
+            enqueueMessage(msg);
+        }
+    }
+
+    @Override
+    public void destroy() {
+        messageExecutor.shutdownNow();
+    }
+
+    private void enqueueMessage(WeixinMessage message) {
+        String userId = message.getFrom_user_id();
+        if (userId == null || userId.isBlank()) {
+            log.debug("ignoring message without from_user_id");
+            return;
+        }
+        try {
+            messageExecutor.execute(() -> handleMessage(message));
+            overloadNoticeSent.set(false);
+        } catch (RejectedExecutionException e) {
+            log.warn("message queue full, dropping message from user={}", userId);
+            if (overloadNoticeSent.compareAndSet(false, true)) {
+                trySendProgress(userId, "当前消息较多，暂未处理这条消息，请稍后重试。");
+            }
         }
     }
 
@@ -130,10 +186,13 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
                 }
             }
         }
+        recordIncoming(fromUserId, text, imageBase64Urls.size(), fileResult);
 
         try {
+            trySendProgress(fromUserId, "正在处理，请稍候...");
             ModelReply reply = router.route(fromUserId, text, imageBase64Urls);
             dispatch(fromUserId, reply);
+            recordOutgoing(fromUserId, reply);
             log.info("reply dispatched to user={}, type={}", fromUserId, reply.getType());
         } catch (IOException e) {
             log.error("route failed for user={}", fromUserId, e);
@@ -155,17 +214,14 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     private void dispatch(String toUser, ModelReply reply) throws IOException {
         switch (reply.getType()) {
             case TEXT -> {
-                trySendProgress(toUser, "正在思考...");
                 ilinkClient.sendText(toUser, reply.getTextContent());
             }
             case IMAGE -> {
-                trySendProgress(toUser, "正在生成图片，请稍候...");
                 for (ModelReply.ImagePayload img : reply.getImages()) {
                     sendImageWithFallback(toUser, img);
                 }
             }
             case MIXED -> {
-                trySendProgress(toUser, mixedProgressMessage(reply));
                 if (reply.getTextContent() != null && !reply.getTextContent().isBlank()) {
                     ilinkClient.sendText(toUser, reply.getTextContent());
                 }
@@ -181,11 +237,9 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
                 }
             }
             case VOICE -> {
-                trySendProgress(toUser, "正在生成语音，请稍候...");
                 sendAudioAsFile(toUser, reply.getAudioPayload());
             }
             case FILE -> {
-                trySendProgress(toUser, "正在生成文件，请稍候...");
                 ModelReply.FilePayload file = reply.getFilePayload();
                 ilinkClient.sendFile(toUser, file.bytes(), file.fileName(), null);
             }
@@ -201,35 +255,6 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
         }
         byte[] mp3Bytes = audioConverter.wavToMp3(audio.bytes());
         ilinkClient.sendFile(toUser, mp3Bytes, "tts.mp3", null);
-    }
-
-    private static String mixedProgressMessage(ModelReply reply) {
-        boolean hasImage = !reply.getImages().isEmpty();
-        boolean hasAudio = reply.getAudioPayload() != null;
-        boolean hasFile = reply.getFilePayload() != null;
-
-        if (hasImage && hasAudio && hasFile) {
-            return "正在生成图片、语音和文件，请稍候...";
-        }
-        if (hasImage && hasAudio) {
-            return "正在生成图片和语音，请稍候...";
-        }
-        if (hasImage && hasFile) {
-            return "正在生成图片和文件，请稍候...";
-        }
-        if (hasAudio && hasFile) {
-            return "正在生成语音和文件，请稍候...";
-        }
-        if (hasImage) {
-            return "正在生成图片，请稍候...";
-        }
-        if (hasAudio) {
-            return "正在生成语音，请稍候...";
-        }
-        if (hasFile) {
-            return "正在生成文件，请稍候...";
-        }
-        return "正在处理...";
     }
 
     private void sendImageWithFallback(String toUser, ModelReply.ImagePayload image) {
@@ -263,9 +288,76 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     private void trySendProgress(String toUser, String message) {
         try {
             ilinkClient.sendText(toUser, message);
+            recordOutgoing(toUser, "进度提示", message);
         } catch (IOException e) {
             log.debug("failed to send progress hint to user={}", toUser);
         }
+    }
+
+    private void recordIncoming(String userId, String text, int imageCount, ParseResult fileResult) {
+        if (chatLogRecorder == null) {
+            return;
+        }
+        StringBuilder content = new StringBuilder();
+        if (text != null && !text.isBlank()) {
+            content.append(text.strip());
+        }
+        if (imageCount > 0) {
+            appendLine(content, "包含图片：" + imageCount + " 张");
+        }
+        if (fileResult != null && fileResult.fileName() != null && !fileResult.fileName().isBlank()) {
+            appendLine(content, "包含文件：" + fileResult.fileName());
+        }
+        chatLogRecorder.incoming(userId, "用户消息", content.toString());
+    }
+
+    private void recordOutgoing(String userId, ModelReply reply) {
+        if (chatLogRecorder == null || reply == null) {
+            return;
+        }
+        StringBuilder content = new StringBuilder();
+        if (reply.getTextContent() != null && !reply.getTextContent().isBlank()) {
+            content.append(reply.getTextContent().strip());
+        }
+        if (!reply.getImages().isEmpty()) {
+            appendLine(content, "发送图片：" + reply.getImages().size() + " 张");
+        }
+        if (reply.getFilePayload() != null) {
+            appendLine(content, "发送文件：" + reply.getFilePayload().fileName());
+        }
+        if (reply.getAudioPayload() != null) {
+            appendLine(content, "发送语音：" + reply.getAudioPayload().durationMs() + "ms");
+        }
+        chatLogRecorder.outgoing(userId, replyTypeLabel(reply), content.toString());
+    }
+
+    private void recordOutgoing(String userId, String kind, String content) {
+        if (chatLogRecorder != null) {
+            chatLogRecorder.outgoing(userId, kind, content);
+        }
+    }
+
+    private void recordFailure(String userId, String kind, String content) {
+        if (chatLogRecorder != null) {
+            chatLogRecorder.failed(userId, kind, content);
+        }
+    }
+
+    private static void appendLine(StringBuilder builder, String line) {
+        if (builder.length() > 0) {
+            builder.append('\n');
+        }
+        builder.append(line);
+    }
+
+    private static String replyTypeLabel(ModelReply reply) {
+        return switch (reply.getType()) {
+            case TEXT -> "文本回复";
+            case IMAGE -> "图片回复";
+            case MIXED -> "混合回复";
+            case VOICE -> "语音回复";
+            case FILE -> "文件回复";
+        };
     }
 
     private static String extractText(List<MessageItem> items) {
@@ -362,8 +454,8 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
             try {
                 if (voiceItem.getText() != null && !voiceItem.getText().isBlank()) {
                     String inlineText = voiceItem.getText().trim();
-                    log.info("using voice transcript from message metadata: encodeType={}, text={}",
-                            voiceItem.getEncode_type(), inlineText);
+                    log.info("using voice transcript from message metadata: encodeType={}, textLength={}",
+                            voiceItem.getEncode_type(), inlineText.length());
                     return inlineText;
                 }
 
@@ -377,7 +469,7 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
                         voiceBytes.length, voiceItem.getEncode_type(),
                         voiceItem.getSample_rate(), voiceItem.getPlaytime());
                 String text = sttClient.recognize(voiceBytes, format);
-                log.info("STT result: {}", text);
+                log.info("STT completed: textLength={}", text != null ? text.length() : 0);
                 return text;
             } catch (Exception e) {
                 log.error("STT failed", e);
@@ -401,19 +493,23 @@ public class MessageHandler implements OnMessageListener, InitializingBean {
     }
 
     private void replyNotSupported(String toUserId) {
+        String reply = "目前支持文本、图片和语音消息，请发文字、图片或语音给我。";
         try {
-            ilinkClient.sendText(toUserId, "目前支持文本、图片和语音消息，请发文字、图片或语音给我。");
+            ilinkClient.sendText(toUserId, reply);
+            recordOutgoing(toUserId, "能力提示", reply);
         } catch (IOException e) {
             log.error("failed to send not-supported hint to user={}", toUserId, e);
         }
     }
 
     private void sendErrorReply(String toUserId, String detail) {
-        String reply = detail != null && !detail.isBlank()
-                ? "抱歉，AI 服务返回错误：" + detail + "\n请稍后再试。"
-                : "抱歉，处理消息时发生错误，请稍后再试。";
+        if (detail != null && !detail.isBlank()) {
+            log.debug("sending generic failure reply to user={}: {}", toUserId, detail);
+        }
+        String reply = "抱歉，处理消息时发生错误，请稍后再试。";
         try {
             ilinkClient.sendText(toUserId, reply);
+            recordFailure(toUserId, "错误提示", reply);
         } catch (IOException e) {
             log.error("failed to send error fallback to user={}", toUserId, e);
         }

@@ -6,6 +6,7 @@ import com.youkeda.project.wechatproject.bot.agent.AgentResult;
 import com.youkeda.project.wechatproject.bot.agent.AgentTask;
 import com.youkeda.project.wechatproject.bot.agent.AgentUnit;
 import com.youkeda.project.wechatproject.bot.router.MessageRouter;
+import com.youkeda.project.wechatproject.bot.router.IntentRouter;
 import com.youkeda.project.wechatproject.bot.router.SimpleModeRouter;
 import com.youkeda.project.wechatproject.bot.model.ModelReply;
 import com.youkeda.project.wechatproject.bot.orchestrator.OrchestrationResult;
@@ -111,13 +112,38 @@ class MessageRouterTests {
         assertThat(reply.getFilePayload()).isNull();
     }
 
+    @Test
+    void directTravelRouteReturnsTheTravelResultWhenReflectionIsSkipped() throws IOException {
+        RecordingTravelAgent travelAgent = new RecordingTravelAgent("杭州当前晴，26C");
+        AgentRegistry registry = new AgentRegistry(List.of(travelAgent), null);
+        OrchestratorProperties properties = new OrchestratorProperties();
+        MessageRouter router = new MessageRouter(
+                new UnsupportedReminderOrchestrator(),
+                registry,
+                null,
+                null,
+                null,
+                properties,
+                new SimpleModeRouter(registry, null),
+                new IntentRouter(registry));
+
+        ModelReply reply = router.route("user-1", "杭州天气", List.of());
+
+        assertThat(reply.getType()).isEqualTo(ModelReply.Type.TEXT);
+        assertThat(reply.getTextContent()).isEqualTo("杭州当前晴，26C");
+    }
+
     private static class UnsupportedReminderOrchestrator implements OrchestratorAgent {
         @Override
         public OrchestrationResult plan(UserRequest request) {
+            boolean dynamicTask = request.text() != null && request.text().contains("\u5929\u6c14");
+            String instruction = dynamicTask
+                    ? "apply_automation_plan: create an LLM_TASK. Do not query weather. Do not simulate future results."
+                    : "apply_automation_plan: create a TEXT_REMINDER.";
             return OrchestrationResult.builder()
-                    .status(OrchestrationResult.Status.COMPLETED)
-                    .reasoning("unsupported reminder")
-                    .finalReply(ModelReply.text("unsupported reminder"))
+                    .status(OrchestrationResult.Status.EXECUTE)
+                    .reasoning("planner routed reminder to chat")
+                    .tasks(List.of(new AgentTask("CHAT", instruction, Map.of())))
                     .build();
         }
 
@@ -173,6 +199,29 @@ class MessageRouterTests {
         @Override
         public OrchestrationResult reflect(TaskScratchpad scratchpad, UserRequest originalRequest) {
             throw new UnsupportedOperationException("reflection disabled in this test");
+        }
+    }
+
+    private static class RecordingTravelAgent implements AgentUnit {
+        private final String response;
+
+        RecordingTravelAgent(String response) {
+            this.response = response;
+        }
+
+        @Override
+        public String getName() {
+            return "TRAVEL";
+        }
+
+        @Override
+        public AgentCapability getCapability() {
+            return new AgentCapability("travel", "Handles travel requests.", List.of("weather"), "text");
+        }
+
+        @Override
+        public AgentResult execute(AgentTask task) {
+            return AgentResult.success(task.taskId(), response, response);
         }
     }
 }

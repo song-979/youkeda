@@ -37,11 +37,13 @@ import com.youkeda.project.wechatproject.bot.memory.OpenClawConversationMemory;
 import com.youkeda.project.wechatproject.bot.memory.RagStore;
 import com.youkeda.project.wechatproject.bot.memory.SqliteRagStore;
 import com.youkeda.project.wechatproject.bot.memory.VectorMemoryIndex;
+import com.youkeda.project.wechatproject.bot.monitor.ChatLogRecorder;
 import com.youkeda.project.wechatproject.bot.service.AiService.EmbeddingClient;
 import com.youkeda.project.wechatproject.bot.service.AiService.OpenAiCompatibleEmbeddingClient;
 import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorAgent;
 import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorAgentImpl;
 import com.youkeda.project.wechatproject.bot.orchestrator.OrchestratorProperties;
+import com.youkeda.project.wechatproject.bot.router.IntentRouter;
 import com.youkeda.project.wechatproject.bot.router.MessageRouter;
 import com.youkeda.project.wechatproject.bot.router.SimpleModeRouter;
 import com.youkeda.project.wechatproject.bot.service.VoiceService.AudioConverter;
@@ -530,16 +532,25 @@ public class BotAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public IntentRouter intentRouter(AgentRegistry agentRegistry) {
+        log.info("creating IntentRouter (L1/L2 lightweight routing)");
+        return new IntentRouter(agentRegistry);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
     public MessageRouter messageRouter(OrchestratorAgent orchestratorAgent,
                                        AgentRegistry agentRegistry,
                                        ConversationMemory conversationMemory,
                                        VoiceCatalog voiceCatalog,
                                        DocumentService documentService,
                                        OrchestratorProperties orchestratorProperties,
-                                       SimpleModeRouter simpleModeRouter) {
+                                       SimpleModeRouter simpleModeRouter,
+                                       IntentRouter intentRouter) {
         log.info("creating MessageRouter (orchestration mode)");
         return new MessageRouter(orchestratorAgent, agentRegistry, conversationMemory, voiceCatalog,
-                documentService, orchestratorProperties, simpleModeRouter);
+                documentService, orchestratorProperties, simpleModeRouter, intentRouter);
     }
 
     @Bean
@@ -599,9 +610,6 @@ public class BotAutoConfiguration {
                 }
                 case MIXED -> {
                     String text = reply.getTextContent();
-                    if (text != null && !text.isBlank() && client != null) {
-                        client.sendText(request.recipientId(), text);
-                    }
                     // 发送图片
                     var images = reply.getImages();
                     if (images != null && !images.isEmpty() && client != null) {
@@ -657,11 +665,13 @@ public class BotAutoConfiguration {
                                          ObjectProvider<AudioConverter> audioConverterProvider,
                                          DocumentService documentService,
                                          ObjectProvider<AutomationRuntime> automationRuntimeProvider,
-                                         ObjectProvider<RagStore> ragStoreProvider) {
+                                         ObjectProvider<RagStore> ragStoreProvider,
+                                         ObjectProvider<ChatLogRecorder> chatLogRecorderProvider) {
         log.info("creating MessageHandler");
         return new MessageHandler(ilinkClient, messageBridge, messageRouter,
                 sttClientProvider.getIfAvailable(), audioConverterProvider.getIfAvailable(), documentService,
                 automationRuntimeProvider.getIfAvailable(),
-                ragStoreProvider.getIfAvailable());
+                ragStoreProvider.getIfAvailable(),
+                chatLogRecorderProvider.getIfAvailable());
     }
 }

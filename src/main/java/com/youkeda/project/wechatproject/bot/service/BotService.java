@@ -98,9 +98,8 @@ public final class BotService {
         public String login(ILinkClient client) {
             String qr = client.executeLogin();
             this.qrcode = qr;
-            String preview = qr == null ? null : (qr.length() > 120 ? qr.substring(0, 120) + "..." : qr);
-            log.info("iLink QR code obtained. preview: {}", preview);
-            log.info("iLink login polling token: {}", client.getQrcode());
+            log.info("iLink QR code obtained: available={}, length={}",
+                    qr != null && !qr.isBlank(), qr != null ? qr.length() : 0);
             return qr;
         }
 
@@ -181,12 +180,11 @@ public final class BotService {
                 log.info("iLink auto-login disabled (ilink.auto-login=false)");
                 return;
             }
-            log.info("starting iLink login...");
+                log.info("starting iLink login...");
             try {
                 String qrcode = messageBridge.login(ilinkClient);
-                String qrPreview = qrcode != null && qrcode.length() > 80
-                        ? qrcode.substring(0, 80) + "..." : qrcode;
-                log.info("iLink QR code obtained ({} chars), preview: {}", qrcode != null ? qrcode.length() : 0, qrPreview);
+                log.info("iLink QR code ready: available={}, length={}",
+                        qrcode != null && !qrcode.isBlank(), qrcode != null ? qrcode.length() : 0);
                 System.out.println("\n========================================");
                 System.out.println("  请浏览器打开以下地址完成首次配置:");
                 System.out.println("  http://localhost:8080");
