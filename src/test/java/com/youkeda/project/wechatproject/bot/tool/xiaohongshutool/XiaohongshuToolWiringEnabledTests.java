@@ -14,7 +14,8 @@ import static org.assertj.core.api.Assertions.assertThat;
         "agent.speech.enabled=false",
         "agent.tools.xiaohongshu.enabled=true",
         "agent.tools.xiaohongshu.endpoint=https://mcp.example.com/xhs",
-        "agent.tools.xiaohongshu.process.auto-start=false"
+        "agent.tools.xiaohongshu.process.auto-start=false",
+        "agent.tools.automation.heartbeat-enabled=false"
 })
 class XiaohongshuToolWiringEnabledTests {
 

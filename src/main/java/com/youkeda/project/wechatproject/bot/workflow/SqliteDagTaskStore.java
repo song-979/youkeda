@@ -3,6 +3,10 @@ package com.youkeda.project.wechatproject.bot.workflow;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.youkeda.project.wechatproject.bot.agent.AgentResult;
+import com.youkeda.project.wechatproject.bot.artifact.ArtifactRef;
+import com.youkeda.project.wechatproject.bot.artifact.ArtifactRole;
+import com.youkeda.project.wechatproject.bot.artifact.ArtifactStatus;
+import com.youkeda.project.wechatproject.bot.artifact.ArtifactType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,7 +32,7 @@ public class SqliteDagTaskStore implements DagTaskStore {
     private static final TypeReference<Map<String, Object>> OBJECT_MAP = new TypeReference<>() {};
     private static final TypeReference<Map<String, String>> STRING_MAP = new TypeReference<>() {};
     private static final String ACTIVE_STATUSES =
-            "'PLANNING','RUNNING','PAUSE_REQUESTED','PAUSED','WAITING_USER'";
+            "'PLANNING','RUNNING','PAUSE_REQUESTED','PAUSED','WAITING_USER','SLEEPING'";
 
     private final String jdbcUrl;
 
@@ -106,6 +110,7 @@ public class SqliteDagTaskStore implements DagTaskStore {
             addColumnIfMissing(statement, "dag_node", "input_fingerprint", "TEXT");
             addColumnIfMissing(statement, "dag_node", "execution_revision", "INTEGER NOT NULL DEFAULT 0");
             addColumnIfMissing(statement, "dag_node", "result_revision", "INTEGER NOT NULL DEFAULT 0");
+            addColumnIfMissing(statement, "dag_node", "artifacts_json", "TEXT NOT NULL DEFAULT '[]'");
         }
     }
 
@@ -260,8 +265,9 @@ public class SqliteDagTaskStore implements DagTaskStore {
                 INSERT INTO dag_node
                 (workflow_id,node_id,node_key,agent_type,instruction,context_note,dependencies_json,parameters_json,
                  status,attempt_count,max_attempts,next_attempt_at,result_status,raw_output,error_message,error_kind,
-                 message_to_user,resume_state_json,signals_json,input_fingerprint,execution_revision,result_revision)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 message_to_user,resume_state_json,signals_json,input_fingerprint,execution_revision,result_revision,
+                 artifacts_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(workflow_id,node_id) DO UPDATE SET
                   status=excluded.status, attempt_count=excluded.attempt_count,
                   next_attempt_at=excluded.next_attempt_at, result_status=excluded.result_status,
@@ -269,7 +275,8 @@ public class SqliteDagTaskStore implements DagTaskStore {
                   error_kind=excluded.error_kind, message_to_user=excluded.message_to_user,
                   resume_state_json=excluded.resume_state_json, signals_json=excluded.signals_json,
                   input_fingerprint=excluded.input_fingerprint,
-                  execution_revision=excluded.execution_revision, result_revision=excluded.result_revision
+                  execution_revision=excluded.execution_revision, result_revision=excluded.result_revision,
+                  artifacts_json=excluded.artifacts_json
                 """;
         AgentResult result = node.result();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -295,6 +302,7 @@ public class SqliteDagTaskStore implements DagTaskStore {
             statement.setString(20, node.inputFingerprint());
             statement.setInt(21, node.executionRevision());
             statement.setInt(22, node.resultRevision());
+            statement.setString(23, artifactsJson(result != null ? result.artifacts() : List.of()));
             statement.executeUpdate();
         }
     }
@@ -342,7 +350,8 @@ public class SqliteDagTaskStore implements DagTaskStore {
                     status == AgentResult.Status.SUCCESS ? rawOutput : null, rawOutput,
                     errorMessage, kind, rs.getString("message_to_user"),
                     readMap(rs.getString("resume_state_json")), List.of(),
-                    readStringMap(rs.getString("signals_json")));
+                    readStringMap(rs.getString("signals_json")),
+                    readArtifacts(rs.getString("artifacts_json")));
         }
         DagNode.Status nodeStatus = DagNode.Status.valueOf(rs.getString("status"));
         if (nodeStatus == DagNode.Status.RUNNING) nodeStatus = DagNode.Status.READY;
@@ -362,6 +371,68 @@ public class SqliteDagTaskStore implements DagTaskStore {
 
     private static Map<String, Object> readMap(String json) throws Exception {
         return json == null || json.isBlank() ? Map.of() : MAPPER.readValue(json, OBJECT_MAP);
+    }
+
+    private static String artifactsJson(List<ArtifactRef> artifacts) throws Exception {
+        List<Map<String, Object>> values = artifacts.stream().map(artifact -> {
+            Map<String, Object> value = new java.util.LinkedHashMap<>();
+            value.put("artifactId", artifact.artifactId());
+            value.put("recipientId", artifact.recipientId());
+            value.put("requestId", artifact.requestId());
+            value.put("runId", artifact.runId());
+            value.put("nodeId", artifact.nodeId());
+            value.put("revision", artifact.revision());
+            value.put("producerAgent", artifact.producerAgent());
+            value.put("type", artifact.type().name());
+            value.put("role", artifact.role().name());
+            value.put("status", artifact.status().name());
+            value.put("fileName", artifact.fileName());
+            value.put("mimeType", artifact.mimeType());
+            value.put("size", artifact.size());
+            value.put("sha256", artifact.sha256());
+            value.put("description", artifact.description());
+            value.put("attributes", artifact.attributes());
+            value.put("createdAt", artifact.createdAt().toEpochMilli());
+            value.put("expiresAt", artifact.expiresAt() != null ? artifact.expiresAt().toEpochMilli() : null);
+            return value;
+        }).toList();
+        return MAPPER.writeValueAsString(values);
+    }
+
+    private static List<ArtifactRef> readArtifacts(String json) throws Exception {
+        if (json == null || json.isBlank()) return List.of();
+        List<Map<String, Object>> values = MAPPER.readValue(json, new TypeReference<>() {});
+        List<ArtifactRef> artifacts = new java.util.ArrayList<>();
+        for (Map<String, Object> value : values) {
+            Object expires = value.get("expiresAt");
+            artifacts.add(new ArtifactRef(
+                    string(value.get("artifactId")), string(value.get("recipientId")),
+                    string(value.get("requestId")), string(value.get("runId")),
+                    string(value.get("nodeId")), number(value.get("revision")).intValue(),
+                    string(value.get("producerAgent")), ArtifactType.valueOf(string(value.get("type"))),
+                    ArtifactRole.valueOf(string(value.get("role"))), ArtifactStatus.valueOf(string(value.get("status"))),
+                    string(value.get("fileName")), string(value.get("mimeType")),
+                    number(value.get("size")).longValue(), string(value.get("sha256")),
+                    string(value.get("description")), stringMap(value.get("attributes")),
+                    java.time.Instant.ofEpochMilli(number(value.get("createdAt")).longValue()),
+                    expires != null ? java.time.Instant.ofEpochMilli(number(expires).longValue()) : null));
+        }
+        return List.copyOf(artifacts);
+    }
+
+    private static String string(Object value) {
+        return value != null ? String.valueOf(value) : null;
+    }
+
+    private static Number number(Object value) {
+        return value instanceof Number number ? number : Long.parseLong(String.valueOf(value));
+    }
+
+    private static Map<String, String> stringMap(Object value) {
+        if (!(value instanceof Map<?, ?> map)) return Map.of();
+        Map<String, String> result = new java.util.LinkedHashMap<>();
+        map.forEach((key, item) -> result.put(String.valueOf(key), String.valueOf(item)));
+        return Map.copyOf(result);
     }
 
     private static Map<String, String> readStringMap(String json) throws Exception {

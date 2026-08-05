@@ -245,6 +245,7 @@ public class DefaultContextEngineeringService implements ContextEngineeringServi
         return request.stage() == ContextStage.REFLECT
                 || request.stage() == ContextStage.RESUME
                 || request.stage() == ContextStage.SCHEDULED
+                || request.stage() == ContextStage.HEARTBEAT
                 || request.audience() == ContextAudience.DIRECT
                 || relevance == ContextRelevance.RELATED
                 || relevance == ContextRelevance.CONTINUATION

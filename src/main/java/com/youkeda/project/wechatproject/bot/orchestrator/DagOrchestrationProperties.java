@@ -14,6 +14,10 @@ public class DagOrchestrationProperties {
     private int dagPlanRepairAttempts = 1;
     private int dagDefaultMaxAttempts = 3;
     private int dagNodeTimeoutSeconds = 180;
+    private boolean dagDeferredRetryEnabled = true;
+    private int dagMaxDeferredRetries = 2;
+    private int dagDeferredRetryFirstMinutes = 30;
+    private int dagDeferredRetrySecondMinutes = 120;
 
     public int getMaxExecutionSeconds() { return maxExecutionSeconds; }
     public void setMaxExecutionSeconds(int value) { this.maxExecutionSeconds = value; }
@@ -41,4 +45,16 @@ public class DagOrchestrationProperties {
 
     public int getDagNodeTimeoutSeconds() { return dagNodeTimeoutSeconds; }
     public void setDagNodeTimeoutSeconds(int value) { this.dagNodeTimeoutSeconds = value; }
+
+    public boolean isDagDeferredRetryEnabled() { return dagDeferredRetryEnabled; }
+    public void setDagDeferredRetryEnabled(boolean value) { this.dagDeferredRetryEnabled = value; }
+
+    public int getDagMaxDeferredRetries() { return dagMaxDeferredRetries; }
+    public void setDagMaxDeferredRetries(int value) { this.dagMaxDeferredRetries = value; }
+
+    public int getDagDeferredRetryFirstMinutes() { return dagDeferredRetryFirstMinutes; }
+    public void setDagDeferredRetryFirstMinutes(int value) { this.dagDeferredRetryFirstMinutes = value; }
+
+    public int getDagDeferredRetrySecondMinutes() { return dagDeferredRetrySecondMinutes; }
+    public void setDagDeferredRetrySecondMinutes(int value) { this.dagDeferredRetrySecondMinutes = value; }
 }

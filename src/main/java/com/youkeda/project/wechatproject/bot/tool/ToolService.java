@@ -15,6 +15,7 @@ import com.youkeda.project.wechatproject.bot.tool.chat.AutomationProperties;
 import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
 import com.youkeda.project.wechatproject.bot.tool.chat.AutomationStore;
 import com.youkeda.project.wechatproject.bot.tool.chat.AutomationTools;
+import com.youkeda.project.wechatproject.bot.tool.chat.AgentSleepTool;
 import com.youkeda.project.wechatproject.bot.tool.chat.JsonAutomationStore;
 import com.youkeda.project.wechatproject.bot.tool.chat.RecipientBindingListener;
 import com.youkeda.project.wechatproject.bot.tool.chat.ScheduledTaskExecutionResult;
@@ -256,6 +257,13 @@ public class ToolService {
     @ConditionalOnProperty(prefix = "agent.tools.automation", name = "enabled", havingValue = "true", matchIfMissing = true)
     public AutomationTools automationTools(AutomationRuntime automationRuntime, AutomationProperties properties) {
         return new AutomationTools(automationRuntime, properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.automation", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public AgentSleepTool agentSleepTool(AutomationRuntime automationRuntime) {
+        return new AgentSleepTool(automationRuntime);
     }
 
     @Bean

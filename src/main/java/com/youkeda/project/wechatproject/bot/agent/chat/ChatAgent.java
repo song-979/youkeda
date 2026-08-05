@@ -9,6 +9,7 @@ import com.youkeda.project.wechatproject.bot.memory.AgentMemory;
 import com.youkeda.project.wechatproject.bot.memory.FileBasedAgentMemory;
 import com.youkeda.project.wechatproject.bot.context.ContextEngineeringService;
 import com.youkeda.project.wechatproject.bot.context.ContextPackage;
+import com.youkeda.project.wechatproject.bot.context.ContextStage;
 import com.youkeda.project.wechatproject.bot.context.ToolLoopContextRuntime;
 import com.youkeda.project.wechatproject.bot.model.ModelReply;
 import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
@@ -18,6 +19,7 @@ import com.youkeda.project.wechatproject.bot.tool.browser.BrowserTools;
 import com.youkeda.project.wechatproject.bot.tool.chat.LocalFileTools;
 import com.youkeda.project.wechatproject.bot.tool.chat.MotouTool;
 import com.youkeda.project.wechatproject.bot.tool.chat.UserMessageTool;
+import com.youkeda.project.wechatproject.bot.tool.chat.AgentSleepTool;
 import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
 import com.youkeda.project.wechatproject.bot.tool.chat.RagTools;
 import com.youkeda.project.wechatproject.bot.tool.chat.SkillTools;
@@ -51,6 +53,30 @@ import java.util.concurrent.atomic.AtomicReference;
 public class ChatAgent implements AgentUnit {
 
     private static final Logger log = LoggerFactory.getLogger(ChatAgent.class);
+    private static final String HEARTBEAT_SYSTEM_PROMPT = """
+            You are in a private heartbeat decision round for the same assistant identity.
+            Keep the assistant's normal personality, relationship continuity, and factual standards,
+            but do not answer as though the user just sent a message. This round is operational and
+            is isolated from ordinary conversation: no tools are available and the internal event
+            must never be quoted or exposed to the user.
+
+            Use the supplied conversation context and sleeping-task list to exercise restrained judgment:
+            - Consider unfinished conversational threads, the user's recent mood, whether a timely check-in
+              would genuinely help, and whether a listed sleeping task is ready to continue.
+            - Silence is a valid and often preferable choice, but do not choose it mechanically when there
+              is clear, timely value in contacting the user.
+            - Resume only an explicitly listed SLEEPING task. Never resume a task waiting for user input or
+              one manually paused by the user.
+            - A retryNode has already passed the system's strict transient-failure and safety checks. Resume it
+              only at or after notBefore; never reinterpret a terminal failure as retryable.
+            - Choose the next wake time deliberately from urgency, uncertainty, task timing, and quiet hours.
+              Do not default to hourly polling when nothing warrants it.
+            - A proactive message must be brief, natural, context-grounded, and ready to send unchanged.
+
+            Return exactly one compact JSON object and no surrounding prose:
+            {"action":"SILENT|CHAT|RESUME_TASK","dagId":null,"message":null,
+             "nextWakeAt":"ISO-8601 datetime with timezone","reason":"short operational reason"}
+            """;
     private final AiModelClient chatClient;
     private final AgentProperties agentProperties;
     private final ChatClient toolChatClient;
@@ -153,22 +179,28 @@ public class ChatAgent implements AgentUnit {
         log.info("ChatAgent executing task: instruction={}", task.instruction());
 
         String userId = stringParam(task.parameters(), "userId");
+        String dagId = stringParam(task.parameters(), "dagId");
         List<String> imageUrls = task.executionContext() != null
                 ? task.executionContext().imageUrls()
                 : stringList(task.parameters().get("imageUrls"));
-        String effectiveSystemPrompt = buildEffectiveSystemPrompt(userId, task.instruction());
+        ContextStage stage = task.executionContext() != null
+                ? task.executionContext().stage() : ContextStage.EXECUTE;
+        String effectiveSystemPrompt = buildEffectiveSystemPrompt(
+                userId, task.instruction(), stage);
         ContextPackage context = AgentContextAssembler.build(
                 contextEngineeringService, task, effectiveSystemPrompt, agentMemory);
 
         String response;
         var pendingDrainRef = new AtomicReference<UserMessageTool.PendingUserMessage>();
+        var sleepDrainRef = new AtomicReference<AgentSleepTool.PendingSleep>();
         var screenshotsDrainRef = new AtomicReference<List<byte[]>>();
         var transcriptReportRef = new AtomicReference<ToolLoopContextRuntime.Report>();
 
-        if (canUseToolLoop()) {
+        boolean toolsEnabled = !Boolean.TRUE.equals(task.parameters().get("disableTools"));
+        if (canUseToolLoop() && toolsEnabled) {
             try {
-                response = chatWithTools(userId, context, imageUrls,
-                        pendingDrainRef, screenshotsDrainRef, transcriptReportRef);
+                response = chatWithTools(userId, dagId, context, imageUrls,
+                        pendingDrainRef, sleepDrainRef, screenshotsDrainRef, transcriptReportRef);
             } catch (RuntimeException e) {
                 log.warn("ChatAgent tool loop failed: {}", e.getMessage());
                 if (chatClient != null) {
@@ -184,12 +216,22 @@ public class ChatAgent implements AgentUnit {
 
         // Detect PAUSED signal from LLM output, or force PAUSED if pending images exist
         UserMessageTool.PendingUserMessage pending = pendingDrainRef.get();
+        AgentSleepTool.PendingSleep pendingSleep = sleepDrainRef.get();
         List<byte[]> drainedScreenshots = screenshotsDrainRef.get() != null
                 ? screenshotsDrainRef.get() : List.of();
 
         boolean hasPendingImages = (pending != null && !pending.images().isEmpty())
                 || !drainedScreenshots.isEmpty();
         boolean isPaused = response != null && response.startsWith("__PAUSED__:");
+
+        if (pendingSleep != null) {
+            Map<String, Object> resumeState = new LinkedHashMap<>();
+            resumeState.put("pauseType", "TIME");
+            resumeState.put("wakeAt", pendingSleep.wakeAt().toString());
+            resumeState.put("wakeReason", pendingSleep.reason() != null ? pendingSleep.reason() : "external wait");
+            log.info("ChatAgent SLEEPING: dagId={}, wakeAt={}", pendingSleep.dagId(), pendingSleep.wakeAt());
+            return AgentResult.paused(task.taskId(), null, resumeState);
+        }
 
         if (isPaused || hasPendingImages) {
             String pausedText = isPaused
@@ -269,8 +311,10 @@ public class ChatAgent implements AgentUnit {
         return toolChatClient != null;
     }
 
-    private String chatWithTools(String userId, ContextPackage context, List<String> imageUrls,
+    private String chatWithTools(String userId, String dagId,
+                                  ContextPackage context, List<String> imageUrls,
                                   AtomicReference<UserMessageTool.PendingUserMessage> pendingRef,
+                                  AtomicReference<AgentSleepTool.PendingSleep> sleepRef,
                                   AtomicReference<List<byte[]>> screenshotsRef,
                                   AtomicReference<ToolLoopContextRuntime.Report> transcriptReportRef) {
         // Hard safety cap — per-round timeout is handled by TimeoutChatModel.
@@ -280,6 +324,7 @@ public class ChatAgent implements AgentUnit {
         var executor = Executors.newSingleThreadExecutor();
         Future<String> future = executor.submit(() -> {
             AutomationRuntime.setCurrentUser(userId);
+            AgentSleepTool.setCurrentDag(dagId);
             RagTools.setCurrentUser(userId);
             DiDiTaxiTools.setCurrentUser(userId);
             SkillTools.setCurrentAgent(getName());
@@ -290,12 +335,14 @@ public class ChatAgent implements AgentUnit {
                         .call()
                         .content();
                 pendingRef.set(UserMessageTool.drain());
+                sleepRef.set(AgentSleepTool.drain());
                 screenshotsRef.set(BrowserTools.drainScreenshots());
                 return resp;
             } finally {
                 transcriptReportRef.set(ToolLoopContextRuntime.drain());
                 SkillTools.clearCurrentAgent();
                 AutomationRuntime.clearCurrentUser();
+                AgentSleepTool.clearCurrentDag();
                 RagTools.clearCurrentUser();
                 DiDiTaxiTools.clearCurrentUser();
             }
@@ -359,11 +406,16 @@ public class ChatAgent implements AgentUnit {
         return signals;
     }
 
-    private String buildEffectiveSystemPrompt(String userId, String instruction) {
+    private String buildEffectiveSystemPrompt(String userId, String instruction,
+                                              ContextStage stage) {
         StringBuilder sb = new StringBuilder();
         String systemPrompt = agentProperties != null ? agentProperties.getSystemPrompt() : null;
         if (systemPrompt != null && !systemPrompt.isBlank()) {
             sb.append(systemPrompt);
+        }
+        if (stage == ContextStage.HEARTBEAT) {
+            if (!sb.isEmpty()) sb.append("\n\n");
+            return sb.append(HEARTBEAT_SYSTEM_PROMPT).toString();
         }
         if (!skillsSummary.isEmpty()) {
             if (!sb.isEmpty()) sb.append("\n");

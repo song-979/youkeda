@@ -11,6 +11,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -193,6 +194,127 @@ class DagOrchestrationServiceTests {
         assertThat(calls.get("base")).hasValue(2);
         assertThat(calls.get("child")).hasValue(1);
         assertThat(calls.get("unrelated")).hasValue(1);
+    }
+
+    @Test
+    void timePausedNodeSleepsAndHeartbeatCanResumeIt() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        AgentUnit agent = agent(task -> {
+            if (calls.incrementAndGet() == 1) {
+                return AgentResult.paused(task.taskId(), null, Map.of(
+                        "pauseType", "TIME",
+                        "wakeAt", "2026-08-05T15:00:00+08:00"));
+            }
+            return AgentResult.success(task.taskId(), "done", "done");
+        });
+        InMemoryStore store = new InMemoryStore();
+        ScriptedPlanner planner = new ScriptedPlanner(List.of(DagPlanDraft.dag("sleep", List.of(
+                node("wait", "wait", List.of())))));
+        DagOrchestrationService service = service(planner, agent, store, false);
+
+        DagRunOutcome sleeping = service.execute(request("user-sleep", "wait for data"), null)
+                .orElseThrow();
+        DagTask task = store.findActive().getFirst();
+        assertThat(sleeping.status()).isEqualTo(DagRunOutcome.Status.PAUSED);
+        assertThat(task.status()).isEqualTo(DagTask.Status.SLEEPING);
+        assertThat(task.nodes()).singleElement()
+                .extracting(DagNode::status)
+                .isEqualTo(DagNode.Status.SLEEPING);
+        CountDownLatch completed = new CountDownLatch(1);
+
+        DagOrchestrationService.DagSubmission resumed = service.resumeSleeping(
+                task.dagId(), request("user-sleep", "wait for data"),
+                outcome -> completed.countDown());
+
+        assertThat(resumed.status()).isEqualTo(DagOrchestrationService.DagSubmission.Status.ACCEPTED);
+        assertThat(completed.await(2, TimeUnit.SECONDS)).isTrue();
+        assertThat(calls).hasValue(2);
+        assertThat(store.findActive()).isEmpty();
+    }
+
+    @Test
+    void verifiedTransientFailureSleepsOnSharedHeartbeatAndResumesFromCheckpoint() throws Exception {
+        Map<String, AtomicInteger> calls = new ConcurrentHashMap<>();
+        AgentUnit agent = agent(task -> {
+            int count = calls.computeIfAbsent(task.instruction(), ignored -> new AtomicInteger())
+                    .incrementAndGet();
+            if (task.instruction().equals("flaky") && count == 1) {
+                return AgentResult.failed(task.taskId(),
+                        "503 service unavailable", AgentResult.ErrorKind.UPSTREAM);
+            }
+            return AgentResult.success(task.taskId(), "ok", "ok-" + task.instruction());
+        });
+        ScriptedPlanner planner = new ScriptedPlanner(List.of(DagPlanDraft.dag("deferred", List.of(
+                node("flaky", "flaky", List.of()),
+                node("stable", "stable", List.of()),
+                node("finish", "finish", List.of("flaky", "stable"))))));
+        InMemoryStore store = new InMemoryStore();
+        DagOrchestrationProperties properties = new DagOrchestrationProperties();
+        properties.setReflectionEnabled(false);
+        properties.setDagDefaultMaxAttempts(1);
+        properties.setDagDeferredRetryFirstMinutes(1);
+        List<Instant> scheduledWakes = new ArrayList<>();
+        DagOrchestrationService service = new DagOrchestrationService(
+                planner, new AgentRegistry(List.of(agent), null), store, properties,
+                null, null, (userId, wakeAt, reason) -> {
+                    scheduledWakes.add(wakeAt);
+                    return true;
+                });
+        services.add(service);
+
+        DagRunOutcome sleeping = service.execute(
+                request("user-deferred", "retry later"), null).orElseThrow();
+        DagTask task = store.findActive().getFirst();
+        DagNode retryNode = task.nodes().stream()
+                .filter(node -> node.key().equals("flaky")).findFirst().orElseThrow();
+
+        assertThat(sleeping.status()).isEqualTo(DagRunOutcome.Status.PAUSED);
+        assertThat(task.status()).isEqualTo(DagTask.Status.SLEEPING);
+        assertThat(retryNode.status()).isEqualTo(DagNode.Status.RETRY_WAIT);
+        assertThat(scheduledWakes).containsExactly(Instant.ofEpochMilli(retryNode.nextAttemptAt()));
+        assertThat(service.resumeSleeping(task.dagId(), request("user-deferred", "retry later"), null)
+                .status()).isEqualTo(DagOrchestrationService.DagSubmission.Status.UNAVAILABLE);
+
+        retryNode.setNextAttemptAt(System.currentTimeMillis() - 1);
+        store.save(task);
+        CountDownLatch completed = new CountDownLatch(1);
+        DagOrchestrationService.DagSubmission resumed = service.resumeSleeping(
+                task.dagId(), request("user-deferred", "retry later"),
+                outcome -> completed.countDown());
+
+        assertThat(resumed.status()).isEqualTo(DagOrchestrationService.DagSubmission.Status.ACCEPTED);
+        assertThat(completed.await(2, TimeUnit.SECONDS)).isTrue();
+        assertThat(calls.get("flaky")).hasValue(2);
+        assertThat(calls.get("stable")).hasValue(1);
+        assertThat(calls.get("finish")).hasValue(1);
+    }
+
+    @Test
+    void unknownFailureTerminatesWithoutSchedulingHeartbeatSleep() {
+        AgentUnit agent = agent(task -> AgentResult.failed(
+                task.taskId(), "unclassified failure", AgentResult.ErrorKind.UNKNOWN));
+        ScriptedPlanner planner = new ScriptedPlanner(List.of(DagPlanDraft.dag("terminal", List.of(
+                node("unknown", "unknown", List.of())))));
+        InMemoryStore store = new InMemoryStore();
+        DagOrchestrationProperties properties = new DagOrchestrationProperties();
+        properties.setReflectionEnabled(false);
+        properties.setDagDefaultMaxAttempts(1);
+        List<Instant> scheduledWakes = new ArrayList<>();
+        DagOrchestrationService service = new DagOrchestrationService(
+                planner, new AgentRegistry(List.of(agent), null), store, properties,
+                null, null, (userId, wakeAt, reason) -> {
+                    scheduledWakes.add(wakeAt);
+                    return true;
+                });
+        services.add(service);
+
+        DagRunOutcome outcome = service.execute(
+                request("user-terminal", "do not retry unknown errors"), null).orElseThrow();
+
+        assertThat(outcome.status()).isEqualTo(DagRunOutcome.Status.COMPLETED);
+        assertThat(scheduledWakes).isEmpty();
+        assertThat(store.findActive()).isEmpty();
+        assertThat(outcome.finalReply()).contains("失败步骤");
     }
 
     @Test

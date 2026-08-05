@@ -19,6 +19,7 @@ public class DagTask {
         PAUSE_REQUESTED,
         PAUSED,
         WAITING_USER,
+        SLEEPING,
         SUCCEEDED,
         PARTIAL_SUCCEEDED,
         FAILED,
@@ -123,7 +124,7 @@ public class DagTask {
 
     public boolean isActive() {
         return switch (status) {
-            case PLANNING, RUNNING, PAUSE_REQUESTED, PAUSED, WAITING_USER -> true;
+            case PLANNING, RUNNING, PAUSE_REQUESTED, PAUSED, WAITING_USER, SLEEPING -> true;
             default -> false;
         };
     }
@@ -155,6 +156,10 @@ public class DagTask {
 
     public boolean hasWaitingNode() {
         return nodes.values().stream().anyMatch(node -> node.status() == DagNode.Status.WAITING_USER);
+    }
+
+    public boolean hasSleepingNode() {
+        return nodes.values().stream().anyMatch(node -> node.status() == DagNode.Status.SLEEPING);
     }
 
     public boolean hasFailedNode() {

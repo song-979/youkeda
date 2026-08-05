@@ -47,16 +47,8 @@ public final class DagContextMapper {
     }
 
     public static List<String> dependencyImageDataUrls(DagTask workflow, DagNode currentNode) {
-        Set<String> ancestors = ancestorIds(workflow, currentNode);
-        return workflow.nodes().stream()
-                .filter(node -> ancestors.contains(node.id()))
-                .map(DagNode::result)
-                .filter(java.util.Objects::nonNull)
-                .flatMap(result -> result.output() instanceof com.youkeda.project.wechatproject.bot.service.AiService.GeneratedImage image
-                        ? java.util.stream.Stream.of(image.dataUrl())
-                        : java.util.stream.Stream.empty())
-                .distinct()
-                .toList();
+        // Generated payloads stay in the artifact store. Model context receives metadata only.
+        return List.of();
     }
 
     private static Set<String> ancestorIds(DagTask workflow, DagNode currentNode) {
@@ -77,6 +69,18 @@ public final class DagContextMapper {
 
     private static ContextTaskRecord toRecord(DagNode node) {
         AgentResult result = node.result();
+        java.util.Map<String, String> signals = new java.util.LinkedHashMap<>();
+        if (result != null) {
+            signals.putAll(result.signals());
+            if (!result.artifacts().isEmpty()) {
+                String index = result.artifacts().stream()
+                        .map(artifact -> artifact.artifactId() + "|" + artifact.type()
+                                + "|" + artifact.role() + "|" + artifact.status()
+                                + "|" + safe(artifact.description()))
+                        .reduce((a, b) -> a + ";" + b).orElse("");
+                signals.put("artifact_index", index);
+            }
+        }
         return new ContextTaskRecord(
                 node.id(),
                 node.key(),
@@ -87,7 +91,7 @@ public final class DagContextMapper {
                 result != null ? result.rawOutput() : null,
                 result != null ? result.errorMessage() : null,
                 result != null ? result.messageToUser() : null,
-                result != null ? result.signals() : java.util.Map.of());
+                java.util.Map.copyOf(signals));
     }
 
     private static String safe(String value) {

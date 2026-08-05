@@ -209,6 +209,25 @@
     "maxRetries" : 2,
     "ownerId" : null
   }, {
+    "id" : "R-7626B3EF-B59",
+    "title" : "agent heartbeat",
+    "remindAt" : 1785913652.030626200,
+    "message" : "user activity changed heartbeat context",
+    "status" : "PENDING",
+    "createdAt" : 1785902288.547156900,
+    "updatedAt" : 1785910052.030626200,
+    "failureMessage" : null,
+    "sendAttempts" : 0,
+    "actionType" : "TEXT",
+    "actionTarget" : "USER_ACTIVITY",
+    "recurringTaskId" : null,
+    "taskKind" : "AGENT_HEARTBEAT",
+    "instruction" : "Evaluate whether to contact the user or resume a sleeping task, then choose the next wake time.",
+    "originalRequest" : null,
+    "expectedToolCategories" : [ ],
+    "maxRetries" : 0,
+    "ownerId" : "o9cq807d5yyDrD5d1Ul5MpjU_mvc@im.wechat"
+  }, {
     "id" : "R-9704AD80-774",
     "title" : "查询杭州市余杭区实时天气",
     "remindAt" : 1785913800.000000000,

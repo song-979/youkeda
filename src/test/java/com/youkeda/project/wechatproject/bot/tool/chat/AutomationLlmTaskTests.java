@@ -154,6 +154,70 @@ class AutomationLlmTaskTests {
         assertThat(updated.instruction()).isEqualTo("现在查询杭州市余杭区天气。");
     }
 
+    @Test
+    void silentHeartbeatReschedulesSameReminderWithoutDispatching() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderDispatcher dispatcher = new RecordingReminderDispatcher();
+        Instant nextWake = FIXED_CLOCK.instant().plusSeconds(3 * 60 * 60);
+        AutomationRuntime runtime = newRuntime(store, dispatcher, request ->
+                ScheduledTaskExecutionResult.reschedule(nextWake, null, "nothing useful to send"));
+        runtime.markUserActivity("user-a@im.wechat");
+        AutomationStore.Reminder heartbeat = runtime.findAgentHeartbeat("user-a@im.wechat").orElseThrow();
+
+        runtime.triggerReminder(heartbeat.id());
+
+        assertThat(dispatcher.messages).isEmpty();
+        assertThat(store.listReminders(null)).hasSize(1);
+        assertThat(runtime.findAgentHeartbeat("user-a@im.wechat"))
+                .get()
+                .satisfies(rescheduled -> {
+                    assertThat(rescheduled.id()).isEqualTo(heartbeat.id());
+                    assertThat(rescheduled.remindAt()).isEqualTo(nextWake);
+                    assertThat(rescheduled.message()).isEqualTo("nothing useful to send");
+                });
+    }
+
+    @Test
+    void chatHeartbeatDispatchesExactlyOnceAndReschedules() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderDispatcher dispatcher = new RecordingReminderDispatcher();
+        Instant nextWake = FIXED_CLOCK.instant().plusSeconds(2 * 60 * 60);
+        AutomationRuntime runtime = newRuntime(store, dispatcher, request ->
+                ScheduledTaskExecutionResult.reschedule(
+                        nextWake, "How did the meeting go?", "follow up after the meeting"));
+        runtime.markUserActivity("user-a@im.wechat");
+        AutomationStore.Reminder heartbeat = runtime.findAgentHeartbeat("user-a@im.wechat").orElseThrow();
+
+        runtime.triggerReminder(heartbeat.id());
+
+        assertThat(dispatcher.messages).containsExactly("How did the meeting go?");
+        assertThat(runtime.findAgentHeartbeat("user-a@im.wechat"))
+                .get()
+                .extracting(AutomationStore.Reminder::remindAt)
+                .isEqualTo(nextWake);
+    }
+
+    @Test
+    void failedHeartbeatFallsBackToOneHour() {
+        InMemoryAutomationStore store = new InMemoryAutomationStore();
+        RecordingReminderDispatcher dispatcher = new RecordingReminderDispatcher();
+        AutomationRuntime runtime = newRuntime(store, dispatcher,
+                request -> ScheduledTaskExecutionResult.failure("model unavailable"));
+        runtime.markUserActivity("user-a@im.wechat");
+        AutomationStore.Reminder heartbeat = runtime.findAgentHeartbeat("user-a@im.wechat").orElseThrow();
+
+        runtime.triggerReminder(heartbeat.id());
+
+        assertThat(dispatcher.messages).isEmpty();
+        assertThat(runtime.findAgentHeartbeat("user-a@im.wechat"))
+                .get()
+                .satisfies(rescheduled -> {
+                    assertThat(rescheduled.status()).isEqualTo(AutomationStore.ReminderStatus.PENDING);
+                    assertThat(rescheduled.remindAt())
+                            .isEqualTo(FIXED_CLOCK.instant().plusSeconds(60 * 60));
+                });
+    }
+
     private static AutomationRuntime newRuntime(InMemoryAutomationStore store,
                                                 RecordingReminderDispatcher dispatcher,
                                                 ScheduledTaskExecutor executor) {

@@ -14,6 +14,7 @@ public class DagNode {
         SUCCEEDED,
         RETRY_WAIT,
         WAITING_USER,
+        SLEEPING,
         FAILED,
         SKIPPED,
         INVALIDATED,

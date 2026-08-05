@@ -1,7 +1,11 @@
 package com.youkeda.project.wechatproject.bot.router;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.youkeda.project.wechatproject.bot.agent.AgentResult;
 import com.youkeda.project.wechatproject.bot.agent.speech.SpeechAgent;
+import com.youkeda.project.wechatproject.bot.artifact.ArtifactRole;
+import com.youkeda.project.wechatproject.bot.artifact.ReplyAssembler;
 import com.youkeda.project.wechatproject.bot.context.ContextStage;
 import com.youkeda.project.wechatproject.bot.context.ContextTaskState;
 import com.youkeda.project.wechatproject.bot.memory.ConversationMemory;
@@ -11,15 +15,21 @@ import com.youkeda.project.wechatproject.bot.service.AiService.ChatRequest;
 import com.youkeda.project.wechatproject.bot.service.AiService.GeneratedImage;
 import com.youkeda.project.wechatproject.bot.service.DocumentService;
 import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
+import com.youkeda.project.wechatproject.bot.tool.chat.AutomationProperties;
+import com.youkeda.project.wechatproject.bot.tool.chat.AgentSleepTool;
 import com.youkeda.project.wechatproject.bot.tool.chat.LocalFileTools;
 import com.youkeda.project.wechatproject.bot.tool.chat.RagTools;
 import com.youkeda.project.wechatproject.bot.tool.chat.ScheduledTaskExecutionRequest;
+import com.youkeda.project.wechatproject.bot.tool.chat.ScheduledTaskExecutionResult;
+import com.youkeda.project.wechatproject.bot.tool.JsonExtractUtil;
 import com.youkeda.project.wechatproject.bot.tool.chat.UserMessageTool;
 import com.youkeda.project.wechatproject.bot.tool.travel.AmapAroundSearchTools;
 import com.youkeda.project.wechatproject.bot.tool.travel.AmapDirectionTools;
 import com.youkeda.project.wechatproject.bot.tool.travel.DiDiTaxiTools;
 import com.youkeda.project.wechatproject.bot.workflow.DagOrchestrationService;
+import com.youkeda.project.wechatproject.bot.workflow.DagNode;
 import com.youkeda.project.wechatproject.bot.workflow.DagRunOutcome;
+import com.youkeda.project.wechatproject.bot.workflow.DagTask;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,9 +38,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.time.Instant;
+import java.time.Duration;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
@@ -41,6 +55,7 @@ import java.util.regex.Pattern;
 public class MessageRouter {
 
     private static final Logger log = LoggerFactory.getLogger(MessageRouter.class);
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final Pattern FILE_MARKER = Pattern.compile(
             "\\[FILE:(.+?)]\\r?\\n(.*?)\\r?\\n\\[/FILE]", Pattern.DOTALL);
     private static final Pattern MOTOU_GIF_MARKER = Pattern.compile("\\[MOTOU_GIF:(.+?)]");
@@ -52,22 +67,56 @@ public class MessageRouter {
 
     private final ReentrantLock[] userLocks = createUserLocks();
     private final ConcurrentHashMap<String, Boolean> userSimpleMode = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> userActivityVersions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> userActivityTimes = new ConcurrentHashMap<>();
     private final ConversationMemory memory;
     private final DocumentService documentService;
     private final SimpleModeRouter simpleModeRouter;
     private final DagOrchestrationService dagOrchestrationService;
     private final TaskComplexityRouter taskComplexityRouter;
+    private final AutomationProperties automationProperties;
+    private final ReplyAssembler replyAssembler;
 
     public MessageRouter(ConversationMemory memory,
                          DocumentService documentService,
                          SimpleModeRouter simpleModeRouter,
                          DagOrchestrationService dagOrchestrationService,
                          TaskComplexityRouter taskComplexityRouter) {
+        this(memory, documentService, simpleModeRouter, dagOrchestrationService,
+                taskComplexityRouter, new AutomationProperties(), null);
+    }
+
+    public MessageRouter(ConversationMemory memory,
+                         DocumentService documentService,
+                         SimpleModeRouter simpleModeRouter,
+                         DagOrchestrationService dagOrchestrationService,
+                         TaskComplexityRouter taskComplexityRouter,
+                         AutomationProperties automationProperties) {
+        this(memory, documentService, simpleModeRouter, dagOrchestrationService,
+                taskComplexityRouter, automationProperties, null);
+    }
+
+    public MessageRouter(ConversationMemory memory,
+                         DocumentService documentService,
+                         SimpleModeRouter simpleModeRouter,
+                         DagOrchestrationService dagOrchestrationService,
+                         TaskComplexityRouter taskComplexityRouter,
+                         AutomationProperties automationProperties,
+                         ReplyAssembler replyAssembler) {
         this.memory = memory;
         this.documentService = documentService;
         this.simpleModeRouter = simpleModeRouter;
         this.dagOrchestrationService = dagOrchestrationService;
         this.taskComplexityRouter = taskComplexityRouter;
+        this.automationProperties = automationProperties != null
+                ? automationProperties : new AutomationProperties();
+        this.replyAssembler = replyAssembler;
+    }
+
+    public void markUserActivity(String userId) {
+        if (userId == null || userId.isBlank()) return;
+        userActivityVersions.merge(userId, 1L, Long::sum);
+        userActivityTimes.put(userId, System.currentTimeMillis());
     }
 
     public List<ModelReply> route(String userId, String text, List<String> imageBase64Urls,
@@ -82,6 +131,7 @@ public class MessageRouter {
     public List<ModelReply> route(String userId, String text, List<String> imageBase64Urls,
                                   Consumer<String> progressCallback,
                                   Consumer<List<ModelReply>> asyncReplyCallback) throws IOException {
+        markUserActivity(userId);
         LocalFileTools.getAndClearPreparedFile();
         List<String> requestImages = imageBase64Urls != null ? imageBase64Urls : List.of();
         ReentrantLock lock = lockFor(userId);
@@ -139,7 +189,7 @@ public class MessageRouter {
                 if (assessment.isSimple()) {
                     log.info("[ROUTE] selected simple mode userId={} reason={}",
                             userId, assessment.reasonCode());
-                    return List.of(simpleModeRouter.route(userId, text, requestImages));
+                    return simpleModeRouter.routeReplies(userId, text, requestImages);
                 }
             }
 
@@ -161,6 +211,7 @@ public class MessageRouter {
         } finally {
             clearUserContext();
             UserMessageTool.clear();
+            AgentSleepTool.clear();
             lock.unlock();
         }
     }
@@ -197,7 +248,231 @@ public class MessageRouter {
         } finally {
             clearUserContext();
             UserMessageTool.clear();
+            AgentSleepTool.clear();
             lock.unlock();
+        }
+    }
+
+    /** Runs a private, non-conversational heartbeat decision without taking the inbound user lock. */
+    public ScheduledTaskExecutionResult routeHeartbeat(
+            ScheduledTaskExecutionRequest request,
+            Consumer<List<ModelReply>> asyncReplyCallback) throws IOException {
+        String userId = request.recipientId();
+        Instant now = Instant.now();
+        long busyMillis = Duration.ofMinutes(
+                Math.max(1, automationProperties.getHeartbeatBusyDeferralMinutes())).toMillis();
+        long lastActivity = userActivityTimes.getOrDefault(userId, 0L);
+        if (lastActivity > 0 && System.currentTimeMillis() - lastActivity < busyMillis) {
+            log.info("[HEARTBEAT] deferred userId={} reason=recent-user-activity nextWakeAt={}",
+                    userId, now.plusMillis(busyMillis));
+            return ScheduledTaskExecutionResult.reschedule(
+                    now.plusMillis(busyMillis), null, "deferred because the user was recently active");
+        }
+
+        long activityVersion = userActivityVersions.getOrDefault(userId, 0L);
+        List<DagTask> sleepingTasks = dagOrchestrationService == null ? List.of()
+                : dagOrchestrationService.activeDags().stream()
+                .filter(task -> userId.equals(task.recipientId()))
+                .filter(task -> task.status() == DagTask.Status.SLEEPING)
+                .toList();
+        String prompt = heartbeatPrompt(request, sleepingTasks, now);
+        List<ChatRequest.Message> history = memory != null
+                ? memory.getHistory(userId, prompt) : List.of();
+        if (simpleModeRouter == null) {
+            return ScheduledTaskExecutionResult.failure("CHAT agent is unavailable for heartbeat");
+        }
+        log.info("[HEARTBEAT] agent wake started userId={} sleepingTasks={} scheduledFor={}",
+                userId, sleepingTasks.size(), request.scheduledFor());
+        AgentResult result = simpleModeRouter.routeInternalChat(
+                userId, prompt, history, ContextStage.HEARTBEAT, ContextTaskState.empty());
+        HeartbeatDecision decision = parseHeartbeatDecision(result, now);
+
+        if (activityVersion != userActivityVersions.getOrDefault(userId, 0L)) {
+            log.info("[HEARTBEAT] decision discarded userId={} reason=user-activity-changed",
+                    userId);
+            return ScheduledTaskExecutionResult.reschedule(
+                    now.plus(Duration.ofMinutes(
+                            Math.max(1, automationProperties.getHeartbeatBusyDeferralMinutes()))),
+                    null, "discarded because user activity changed during heartbeat evaluation");
+        }
+
+        Instant nextWakeAt = decision.nextWakeAt();
+        Instant requiredRetryWake = sleepingTasks.stream()
+                .flatMap(task -> task.nodes().stream())
+                .filter(node -> node.status() == DagNode.Status.RETRY_WAIT)
+                .map(DagNode::nextAttemptAt)
+                .filter(value -> value > now.toEpochMilli())
+                .map(Instant::ofEpochMilli)
+                .min(Instant::compareTo)
+                .orElse(null);
+        if (requiredRetryWake != null && requiredRetryWake.isBefore(nextWakeAt)) {
+            log.info("[HEARTBEAT] next wake capped by deferred DAG retry userId={} "
+                            + "agentSelected={} requiredRetryAt={}",
+                    userId, nextWakeAt, requiredRetryWake);
+            nextWakeAt = requiredRetryWake;
+        }
+
+        String message = null;
+        boolean resumed = false;
+        if (decision.action() == HeartbeatAction.CHAT) {
+            message = decision.message();
+        } else if (decision.action() == HeartbeatAction.RESUME_TASK
+                && dagOrchestrationService != null) {
+            DagTask selected = sleepingTasks.stream()
+                    .filter(task -> task.dagId().equalsIgnoreCase(nonBlank(decision.dagId(), "")))
+                    .findFirst().orElse(null);
+            if (selected != null) {
+                UserRequest resumeRequest = new UserRequest(
+                        userId, selected.originalText(), List.of(), history,
+                        List.of(), null, ContextStage.RESUME, ContextTaskState.empty());
+                DagOrchestrationService.DagSubmission submission = dagOrchestrationService.resumeSleeping(
+                        selected.dagId(), resumeRequest,
+                        heartbeatOutcomeHandler(userId, asyncReplyCallback));
+                resumed = submission.status() == DagOrchestrationService.DagSubmission.Status.ACCEPTED;
+            }
+        }
+        log.info("[HEARTBEAT] agent decision userId={} action={} dagId={} resumed={} "
+                        + "nextWakeAt={} reason={}",
+                userId, decision.action(), decision.dagId(), resumed,
+                nextWakeAt, truncate(decision.reason(), 160));
+        return ScheduledTaskExecutionResult.reschedule(
+                nextWakeAt, message, decision.reason());
+    }
+
+    private Consumer<DagRunOutcome> heartbeatOutcomeHandler(
+            String recipientId, Consumer<List<ModelReply>> replyCallback) {
+        if (replyCallback == null) return null;
+        return outcome -> {
+            if (outcome == null || outcome.status() == DagRunOutcome.Status.PAUSED) {
+                return;
+            }
+            List<ModelReply> replies;
+            if (outcome.status() == DagRunOutcome.Status.WAITING_USER) {
+                replies = buildWaitingReplies(recipientId, outcome,
+                        "Please provide the information needed to continue.");
+            } else {
+                replies = buildFinalReplies(recipientId, outcome);
+                if (replies.isEmpty() && outcome.finalReply() != null && !outcome.finalReply().isBlank()) {
+                    replies = List.of(ModelReply.text(outcome.finalReply()));
+                }
+            }
+            if (!replies.isEmpty()) replyCallback.accept(replies);
+        };
+    }
+
+    private String heartbeatPrompt(ScheduledTaskExecutionRequest request,
+                                   List<DagTask> sleepingTasks,
+                                   Instant now) {
+        StringBuilder prompt = new StringBuilder("""
+                [agent-heartbeat]
+                Evaluate this wake event using the dedicated heartbeat system contract.
+                Quiet hours are 23:00-08:00 in the configured timezone; background work may continue,
+                but proactive chat during quiet hours requires unusually strong value.
+                """);
+        prompt.append("\nCurrent time: ").append(now.atZone(ZoneId.of(automationProperties.getTimeZone()))).append('\n');
+        if (request.originalRequest() != null && !request.originalRequest().isBlank()) {
+            prompt.append("Last heartbeat note: ").append(truncate(request.originalRequest(), 500)).append('\n');
+        }
+        if (sleepingTasks.isEmpty()) {
+            prompt.append("Sleeping DAGs: none\n");
+        } else {
+            prompt.append("Sleeping DAGs:\n");
+            for (DagTask task : sleepingTasks) {
+                long completedNodes = task.nodes().stream()
+                        .filter(node -> node.status() == DagNode.Status.SUCCEEDED)
+                        .count();
+                prompt.append("- ").append(task.dagId())
+                        .append(" updatedAt=").append(Instant.ofEpochMilli(task.updatedAt()))
+                        .append(" progress=").append(completedNodes).append('/')
+                        .append(task.nodes().size())
+                        .append(" goal=").append(truncate(task.originalText(), 240)).append('\n');
+                task.nodes().stream()
+                        .filter(node -> node.status() == DagNode.Status.SLEEPING
+                                || node.status() == DagNode.Status.RETRY_WAIT)
+                        .findFirst()
+                        .ifPresent(node -> {
+                            Map<String, Object> resumeState = node.result() != null
+                                    ? node.result().resumeState() : Map.of();
+                            if (node.status() == DagNode.Status.RETRY_WAIT) {
+                                prompt.append("  retryNode=").append(node.key())
+                                        .append(" notBefore=")
+                                        .append(Instant.ofEpochMilli(node.nextAttemptAt()))
+                                        .append(" errorKind=")
+                                        .append(node.result() != null ? node.result().errorKind() : "UNKNOWN")
+                                        .append(" attempts=").append(node.attemptCount())
+                                        .append(" reason=").append(truncate(
+                                                node.result() != null
+                                                        ? node.result().errorMessage() : "transient failure", 240))
+                                        .append('\n');
+                            } else {
+                                prompt.append("  sleepingNode=").append(node.key())
+                                        .append(" wakeAt=").append(resumeState.get("wakeAt"))
+                                        .append(" reason=").append(truncate(
+                                                String.valueOf(resumeState.get("wakeReason")), 240))
+                                        .append('\n');
+                            }
+                        });
+                latestSuccessfulNodeText(task).ifPresent(value -> prompt
+                        .append("  latestResult=").append(truncate(value, 400)).append('\n'));
+            }
+        }
+        return prompt.toString();
+    }
+
+    private static java.util.Optional<String> latestSuccessfulNodeText(DagTask task) {
+        List<DagNode> nodes = List.copyOf(task.nodes());
+        for (int i = nodes.size() - 1; i >= 0; i--) {
+            DagNode node = nodes.get(i);
+            if (node.status() != DagNode.Status.SUCCEEDED || node.result() == null) continue;
+            String raw = blankToNull(node.result().rawOutput());
+            if (raw != null) return java.util.Optional.of(raw);
+            if (node.result().output() instanceof String text && !text.isBlank()) {
+                return java.util.Optional.of(text);
+            }
+        }
+        return java.util.Optional.empty();
+    }
+
+    private HeartbeatDecision parseHeartbeatDecision(AgentResult result, Instant now) {
+        String raw = result != null && result.output() instanceof String value ? value : null;
+        String json = JsonExtractUtil.extractJsonObject(raw);
+        Instant fallback = now.plus(Duration.ofMinutes(
+                Math.max(1, automationProperties.getHeartbeatFallbackMinutes())));
+        if (json == null) {
+            return new HeartbeatDecision(
+                    HeartbeatAction.SILENT, null, null, fallback, "invalid model response");
+        }
+        try {
+            JsonNode root = OBJECT_MAPPER.readTree(json);
+            HeartbeatAction action;
+            try {
+                action = HeartbeatAction.valueOf(root.path("action").asText("SILENT")
+                        .trim().toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException ignored) {
+                action = HeartbeatAction.SILENT;
+            }
+            Instant nextWakeAt;
+            try {
+                nextWakeAt = ZonedDateTime.parse(root.path("nextWakeAt").asText()).toInstant();
+            } catch (Exception ignored) {
+                try {
+                    nextWakeAt = java.time.OffsetDateTime.parse(
+                            root.path("nextWakeAt").asText()).toInstant();
+                } catch (Exception ignoredAgain) {
+                    nextWakeAt = fallback;
+                }
+            }
+            String dagId = blankToNull(root.path("dagId").asText(null));
+            String message = blankToNull(root.path("message").asText(null));
+            String reason = blankToNull(root.path("reason").asText(null));
+            if (action == HeartbeatAction.CHAT && message == null) action = HeartbeatAction.SILENT;
+            if (action == HeartbeatAction.RESUME_TASK && dagId == null) action = HeartbeatAction.SILENT;
+            return new HeartbeatDecision(action, dagId, message, nextWakeAt,
+                    nonBlank(reason, action.name().toLowerCase(Locale.ROOT)));
+        } catch (Exception e) {
+            log.warn("invalid heartbeat decision JSON: {}", e.getMessage());
+            return new HeartbeatDecision(
+                    HeartbeatAction.SILENT, null, null, fallback, "invalid decision JSON");
         }
     }
 
@@ -214,10 +489,7 @@ public class MessageRouter {
         if (outcome.get().status() == DagRunOutcome.Status.WAITING_USER) {
             String message = nonBlank(outcome.get().messageToUser(), "请补充信息后继续。");
             appendMemory(userId, userText, message);
-            if (!outcome.get().pausedImages().isEmpty()) {
-                return List.of(ModelReply.mixed(message, outcome.get().pausedImages()));
-            }
-            return List.of(ModelReply.text(message));
+            return buildWaitingReplies(userId, outcome.get(), message);
         }
         return finishCompletedOutcome(userId, userText, outcome.get());
     }
@@ -230,9 +502,7 @@ public class MessageRouter {
             if (outcome.status() == DagRunOutcome.Status.WAITING_USER) {
                 String message = nonBlank(outcome.messageToUser(), "请补充信息后继续。");
                 appendMemory(userId, userText, message);
-                replies = outcome.pausedImages().isEmpty()
-                        ? List.of(ModelReply.text(message))
-                        : List.of(ModelReply.mixed(message, outcome.pausedImages()));
+                replies = buildWaitingReplies(userId, outcome, message);
             } else if (outcome.status() == DagRunOutcome.Status.PAUSED) {
                 replies = List.of(ModelReply.text(nonBlank(
                         outcome.messageToUser(), "DAG 任务已暂停。")));
@@ -245,7 +515,7 @@ public class MessageRouter {
 
     private List<ModelReply> finishCompletedOutcome(String userId, String userText,
                                                     DagRunOutcome outcome) {
-        List<ModelReply> replies = buildFinalReplies(outcome);
+        List<ModelReply> replies = buildFinalReplies(userId, outcome);
         if (replies.isEmpty()) {
             replies = List.of(ModelReply.text(nonBlank(
                     outcome.finalReply(), "任务已结束，但没有可用结果。")));
@@ -282,7 +552,7 @@ public class MessageRouter {
         if (simpleModeRouter == null) {
             return dagUnavailable(userId, text, "simple mode router missing");
         }
-        return List.of(simpleModeRouter.route(userId, text, images));
+        return simpleModeRouter.routeReplies(userId, text, images);
     }
 
     private static boolean isExplicitNewTask(String text) {
@@ -294,7 +564,30 @@ public class MessageRouter {
         return NEW_TASK_PREFIX.matcher(text.trim()).replaceFirst("").trim();
     }
 
-    private List<ModelReply> buildFinalReplies(DagRunOutcome outcome) {
+    private List<ModelReply> buildFinalReplies(String recipientId, DagRunOutcome outcome) {
+        if (replyAssembler == null) {
+            return outcome.finalReply() != null && !outcome.finalReply().isBlank()
+                    ? List.of(ModelReply.text(outcome.finalReply())) : List.of();
+        }
+        return replyAssembler.assemble(outcome.finalReply(), outcome.artifacts(), recipientId,
+                outcome.runId(), java.util.EnumSet.of(ArtifactRole.FINAL_OUTPUT));
+    }
+
+    private List<ModelReply> buildWaitingReplies(String recipientId, DagRunOutcome outcome,
+                                                  String fallbackMessage) {
+        String message = nonBlank(outcome.messageToUser(), fallbackMessage);
+        if (replyAssembler != null && outcome.runId() != null) {
+            List<ModelReply> replies = replyAssembler.assemble(message, outcome.artifacts(), recipientId,
+                    outcome.runId(), java.util.EnumSet.of(ArtifactRole.USER_ACTION));
+            if (!replies.isEmpty()) return replies;
+        }
+        return outcome.pausedImages().isEmpty()
+                ? List.of(ModelReply.text(message))
+                : List.of(ModelReply.mixed(message, outcome.pausedImages()));
+    }
+
+    @Deprecated(forRemoval = true)
+    private List<ModelReply> buildLegacyFinalReplies(DagRunOutcome outcome) {
         List<DagRunOutcome.NodeOutput> outputs = outcome.nodeOutputs();
         List<ModelReply> replies = new ArrayList<>();
         if (!outputs.isEmpty()) {
@@ -568,6 +861,15 @@ public class MessageRouter {
         return value != null && !value.isBlank() ? value : fallback;
     }
 
+    private static String blankToNull(String value) {
+        return value != null && !value.isBlank() ? value : null;
+    }
+
+    private static String truncate(String value, int maxLength) {
+        if (value == null || value.length() <= maxLength) return value;
+        return value.substring(0, Math.max(0, maxLength - 3)) + "...";
+    }
+
     private static ReentrantLock[] createUserLocks() {
         ReentrantLock[] locks = new ReentrantLock[USER_LOCK_STRIPES];
         for (int i = 0; i < locks.length; i++) {
@@ -593,6 +895,16 @@ public class MessageRouter {
     }
 
     private record ParsedFileResult(String fileName, String fileContent, String remainderText) {
+    }
+
+    private enum HeartbeatAction {
+        SILENT,
+        CHAT,
+        RESUME_TASK
+    }
+
+    private record HeartbeatDecision(HeartbeatAction action, String dagId,
+                                     String message, Instant nextWakeAt, String reason) {
     }
 
     private record ImageMemory(List<String> imageUrls, String summary) {

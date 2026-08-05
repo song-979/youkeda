@@ -13,8 +13,9 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 public class AmapDirectionTools implements ToolService.ProjectTool {
 
@@ -32,11 +33,12 @@ public class AmapDirectionTools implements ToolService.ProjectTool {
     private static final int MAX_STEPS = 10;
     private static final int MAX_POLYLINE_POINTS = 60;
 
-    private static final ConcurrentHashMap<String, byte[]> MAP_IMAGE_CACHE = new ConcurrentHashMap<>();
+    private static final ThreadLocal<Map<String, byte[]>> MAP_IMAGE_CACHE =
+            ThreadLocal.withInitial(LinkedHashMap::new);
 
     public static List<byte[]> drainMapImages() {
-        List<byte[]> images = new ArrayList<>(MAP_IMAGE_CACHE.values());
-        MAP_IMAGE_CACHE.clear();
+        List<byte[]> images = new ArrayList<>(MAP_IMAGE_CACHE.get().values());
+        MAP_IMAGE_CACHE.remove();
         return images;
     }
 
@@ -205,7 +207,7 @@ public class AmapDirectionTools implements ToolService.ProjectTool {
                 String mapUrl = m.group(1);
                 byte[] bytes = restTemplate.getForObject(java.net.URI.create(mapUrl), byte[].class);
                 if (bytes != null && bytes.length > 0) {
-                    MAP_IMAGE_CACHE.put(mapUrl, bytes);
+                    MAP_IMAGE_CACHE.get().put(mapUrl, bytes);
                 }
             }
         } catch (Exception e) {

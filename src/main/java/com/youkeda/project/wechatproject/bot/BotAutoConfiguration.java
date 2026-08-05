@@ -10,6 +10,12 @@ import com.github.wechat.ilink.sdk.core.context.ResumeContext;
 import com.github.wechat.ilink.sdk.core.listener.OnLoginListener;
 import com.github.wechat.ilink.sdk.core.login.LoginContext;
 import com.youkeda.project.wechatproject.bot.handler.MessageHandler;
+import com.youkeda.project.wechatproject.bot.artifact.ArtifactCollector;
+import com.youkeda.project.wechatproject.bot.artifact.ArtifactProperties;
+import com.youkeda.project.wechatproject.bot.artifact.ArtifactStore;
+import com.youkeda.project.wechatproject.bot.artifact.ArtifactValidator;
+import com.youkeda.project.wechatproject.bot.artifact.IndexedArtifactStore;
+import com.youkeda.project.wechatproject.bot.artifact.ReplyAssembler;
 import com.youkeda.project.wechatproject.bot.context.CharacterContextTokenEstimator;
 import com.youkeda.project.wechatproject.bot.context.ContextEngineeringProperties;
 import com.youkeda.project.wechatproject.bot.context.ContextEngineeringService;
@@ -19,6 +25,8 @@ import com.youkeda.project.wechatproject.bot.context.DefaultContextEngineeringSe
 import com.youkeda.project.wechatproject.bot.context.LlmContextRelevanceClassifier;
 import com.youkeda.project.wechatproject.bot.context.RuleBasedContextRelevanceClassifier;
 import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
+import com.youkeda.project.wechatproject.bot.tool.chat.AutomationProperties;
+import com.youkeda.project.wechatproject.bot.tool.chat.AutomationStore;
 import com.youkeda.project.wechatproject.bot.tool.chat.SkillTools;
 import com.youkeda.project.wechatproject.bot.service.AiService.AgentProperties;
 import com.youkeda.project.wechatproject.bot.service.AiService.AiModelClient;
@@ -68,6 +76,10 @@ import com.youkeda.project.wechatproject.bot.workflow.DagOrchestrationService;
 import com.youkeda.project.wechatproject.bot.workflow.DagPlanningAgent;
 import com.youkeda.project.wechatproject.bot.workflow.DagTaskStore;
 import com.youkeda.project.wechatproject.bot.workflow.SqliteDagTaskStore;
+import com.youkeda.project.wechatproject.bot.validation.AgentResultGuard;
+import com.youkeda.project.wechatproject.bot.validation.AutomationPersistenceVerifier;
+import com.youkeda.project.wechatproject.bot.validation.DagCompletionGuard;
+import com.youkeda.project.wechatproject.bot.validation.PersistenceEvidenceVerifier;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolChatClientFactory;
 import com.youkeda.project.wechatproject.bot.tool.ToolService.ToolRuntime;
 import org.slf4j.Logger;
@@ -90,12 +102,14 @@ import org.springframework.web.client.RestClient;
 
 import java.io.IOException;
 import java.net.http.HttpClient;
+import java.nio.file.Path;
 import java.util.List;
 
 @Configuration
 @EnableConfigurationProperties({
         IlinkProperties.class,
         AgentProperties.class,
+        ArtifactProperties.class,
         DagOrchestrationProperties.class,
         ContextEngineeringProperties.class,
         SpeechProperties.class
@@ -676,6 +690,55 @@ public class BotAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    public ArtifactValidator artifactValidator() {
+        return new ArtifactValidator();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ArtifactStore artifactStore(ArtifactProperties properties, ArtifactValidator validator) {
+        log.info("creating artifact index at {} with blobs at {}",
+                properties.getIndexPath(), properties.getBlobPath());
+        return new IndexedArtifactStore(Path.of(properties.getIndexPath()),
+                Path.of(properties.getBlobPath()), validator);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ArtifactCollector artifactCollector(ArtifactStore store,
+                                               ObjectProvider<DocumentService> documentServiceProvider) {
+        return new ArtifactCollector(store, documentServiceProvider.getIfAvailable());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public ReplyAssembler replyAssembler(ArtifactStore store) {
+        return new ReplyAssembler(store);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(PersistenceEvidenceVerifier.class)
+    @ConditionalOnBean(AutomationStore.class)
+    public PersistenceEvidenceVerifier persistenceEvidenceVerifier(AutomationStore store) {
+        return new AutomationPersistenceVerifier(store);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public AgentResultGuard agentResultGuard(
+            ArtifactCollector collector,
+            ObjectProvider<PersistenceEvidenceVerifier> verifierProvider) {
+        return new AgentResultGuard(collector, verifierProvider.getIfAvailable());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public DagCompletionGuard dagCompletionGuard() {
+        return new DagCompletionGuard();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.orchestrator", name = "dag-enabled",
             havingValue = "true", matchIfMissing = true)
     public DagTaskStore dagTaskStore(DagOrchestrationProperties properties) {
@@ -689,20 +752,34 @@ public class BotAutoConfiguration {
     @ConditionalOnProperty(prefix = "agent.orchestrator", name = "dag-enabled",
             havingValue = "true", matchIfMissing = true)
     public DagOrchestrationService dagOrchestrationService(DagPlanningAgent planningAgent,
-                                                           AgentRegistry agentRegistry,
-                                                           DagTaskStore taskStore,
-                                                           DagOrchestrationProperties properties) {
+                                                            AgentRegistry agentRegistry,
+                                                            DagTaskStore taskStore,
+                                                            DagOrchestrationProperties properties,
+                                                            AgentResultGuard resultGuard,
+                                                            DagCompletionGuard completionGuard,
+                                                            ObjectProvider<AutomationRuntime> automationRuntimeProvider) {
         log.info("creating DAG orchestration service");
-        return new DagOrchestrationService(planningAgent, agentRegistry, taskStore, properties);
+        return new DagOrchestrationService(planningAgent, agentRegistry, taskStore, properties,
+                resultGuard, completionGuard, (userId, wakeAt, reason) -> {
+                    AutomationRuntime runtime = automationRuntimeProvider.getIfAvailable();
+                    if (runtime == null) {
+                        log.warn("[HEARTBEAT] shared runtime unavailable for deferred DAG retry dagIdReason={}",
+                                reason);
+                        return false;
+                    }
+                    return runtime.scheduleWakeNoLaterThan(userId, wakeAt, reason).success();
+                });
     }
 
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "agent.ai", name = "enabled", havingValue = "true", matchIfMissing = true)
     public SimpleModeRouter simpleModeRouter(AgentRegistry agentRegistry,
-                                             ConversationMemory conversationMemory) {
+                                             ConversationMemory conversationMemory,
+                                             AgentResultGuard resultGuard,
+                                             ReplyAssembler replyAssembler) {
         log.info("creating SimpleModeRouter");
-        return new SimpleModeRouter(agentRegistry, conversationMemory);
+        return new SimpleModeRouter(agentRegistry, conversationMemory, resultGuard, replyAssembler);
     }
 
     @Bean
@@ -728,10 +805,13 @@ public class BotAutoConfiguration {
                                        DocumentService documentService,
                                        SimpleModeRouter simpleModeRouter,
                                        ObjectProvider<DagOrchestrationService> dagServiceProvider,
-                                       ObjectProvider<TaskComplexityRouter> complexityRouterProvider) {
+                                       ObjectProvider<TaskComplexityRouter> complexityRouterProvider,
+                                       AutomationProperties automationProperties,
+                                       ReplyAssembler replyAssembler) {
         log.info("creating MessageRouter (simple + DAG mode)");
         return new MessageRouter(conversationMemory, documentService, simpleModeRouter,
-                dagServiceProvider.getIfAvailable(), complexityRouterProvider.getIfAvailable());
+                dagServiceProvider.getIfAvailable(), complexityRouterProvider.getIfAvailable(),
+                automationProperties, replyAssembler);
     }
 
     @Bean
@@ -741,11 +821,24 @@ public class BotAutoConfiguration {
                                                         ObjectProvider<ILinkClient> ilinkClientProvider,
                                                         ObjectProvider<AudioConverter> audioConverterProvider) {
         return request -> {
-            var replies = messageRouter.routeScheduledTask(request);
             ILinkClient client = ilinkClientProvider.getIfAvailable();
+            if (request.heartbeat()) {
+                return messageRouter.routeHeartbeat(request, replies -> {
+                    for (var reply : replies) {
+                        try {
+                            dispatchScheduledReply(client, audioConverterProvider,
+                                    request.recipientId(), reply);
+                        } catch (IOException e) {
+                            log.warn("heartbeat DAG reply dispatch failed recipient={}: {}",
+                                    request.recipientId(), e.getMessage());
+                        }
+                    }
+                });
+            }
+            var replies = messageRouter.routeScheduledTask(request);
 
             if (replies.isEmpty()) {
-                return ScheduledTaskExecutionResult.success("计划任务已执行完成。");
+                return ScheduledTaskExecutionResult.successDispatched("计划任务已执行完成。");
             }
 
             // Dispatch each reply to the user
@@ -759,11 +852,11 @@ public class BotAutoConfiguration {
                 if (reply.getType() == ModelReply.Type.TEXT || reply.getType() == ModelReply.Type.MIXED) {
                     String text = reply.getTextContent();
                     if (text != null && !text.isBlank()) {
-                        return ScheduledTaskExecutionResult.success(text);
+                        return ScheduledTaskExecutionResult.successDispatched(text);
                     }
                 }
             }
-            return ScheduledTaskExecutionResult.success("计划任务已执行完成。");
+            return ScheduledTaskExecutionResult.successDispatched("计划任务已执行完成。");
         };
     }
 

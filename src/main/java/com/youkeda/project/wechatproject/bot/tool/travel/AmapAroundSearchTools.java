@@ -13,8 +13,9 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 public class AmapAroundSearchTools implements ToolService.ProjectTool {
 
@@ -31,11 +32,12 @@ public class AmapAroundSearchTools implements ToolService.ProjectTool {
     private static final int MAX_LIMIT = 20;
     private static final int MAX_MAP_POI_MARKERS = 9;
 
-    private static final ConcurrentHashMap<String, byte[]> MAP_IMAGE_CACHE = new ConcurrentHashMap<>();
+    private static final ThreadLocal<Map<String, byte[]>> MAP_IMAGE_CACHE =
+            ThreadLocal.withInitial(LinkedHashMap::new);
 
     public static List<byte[]> drainMapImages() {
-        List<byte[]> images = new ArrayList<>(MAP_IMAGE_CACHE.values());
-        MAP_IMAGE_CACHE.clear();
+        List<byte[]> images = new ArrayList<>(MAP_IMAGE_CACHE.get().values());
+        MAP_IMAGE_CACHE.remove();
         return images;
     }
 
@@ -166,7 +168,7 @@ public class AmapAroundSearchTools implements ToolService.ProjectTool {
                 String url = m.group(1);
                 byte[] bytes = restTemplate.getForObject(java.net.URI.create(url), byte[].class);
                 if (bytes != null && bytes.length > 0) {
-                    MAP_IMAGE_CACHE.put(url, bytes);
+                    MAP_IMAGE_CACHE.get().put(url, bytes);
                 }
             }
         } catch (Exception e) {

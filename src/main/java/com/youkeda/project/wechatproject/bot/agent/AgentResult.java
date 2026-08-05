@@ -1,5 +1,6 @@
 package com.youkeda.project.wechatproject.bot.agent;
 
+import com.youkeda.project.wechatproject.bot.artifact.ArtifactRef;
 import com.youkeda.project.wechatproject.bot.model.ModelReply;
 
 import java.util.List;
@@ -23,19 +24,28 @@ public class AgentResult {
     private final Map<String, Object> resumeState;
     private final List<ModelReply.ImagePayload> pausedImages;
     private final Map<String, String> signals;
+    private final List<ArtifactRef> artifacts;
 
     public AgentResult(String taskId, Status status, Object output, String rawOutput,
                        String errorMessage, String messageToUser, Map<String, Object> resumeState,
                        List<ModelReply.ImagePayload> pausedImages,
                        Map<String, String> signals) {
         this(taskId, status, output, rawOutput, errorMessage, classify(errorMessage), messageToUser,
-                resumeState, pausedImages, signals);
+                resumeState, pausedImages, signals, List.of());
     }
 
     public AgentResult(String taskId, Status status, Object output, String rawOutput,
                        String errorMessage, ErrorKind errorKind, String messageToUser,
                        Map<String, Object> resumeState, List<ModelReply.ImagePayload> pausedImages,
                        Map<String, String> signals) {
+        this(taskId, status, output, rawOutput, errorMessage, errorKind, messageToUser,
+                resumeState, pausedImages, signals, List.of());
+    }
+
+    public AgentResult(String taskId, Status status, Object output, String rawOutput,
+                       String errorMessage, ErrorKind errorKind, String messageToUser,
+                       Map<String, Object> resumeState, List<ModelReply.ImagePayload> pausedImages,
+                       Map<String, String> signals, List<ArtifactRef> artifacts) {
         this.taskId = taskId;
         this.status = status;
         this.output = output;
@@ -46,6 +56,7 @@ public class AgentResult {
         this.resumeState = resumeState != null ? Map.copyOf(resumeState) : Map.of();
         this.pausedImages = pausedImages != null ? List.copyOf(pausedImages) : List.of();
         this.signals = signals != null ? Map.copyOf(signals) : Map.of();
+        this.artifacts = artifacts != null ? List.copyOf(artifacts) : List.of();
     }
 
     public String taskId() { return taskId; }
@@ -58,8 +69,21 @@ public class AgentResult {
     public Map<String, Object> resumeState() { return resumeState; }
     public List<ModelReply.ImagePayload> pausedImages() { return pausedImages; }
     public Map<String, String> signals() { return signals; }
+    public List<ArtifactRef> artifacts() { return artifacts; }
 
     public boolean isPaused() { return status == Status.PAUSED; }
+
+    public AgentResult withMaterializedOutput(Object materializedOutput, String materializedRawOutput,
+                                               List<ArtifactRef> materializedArtifacts) {
+        return new AgentResult(taskId, status, materializedOutput, materializedRawOutput,
+                errorMessage, errorKind, messageToUser, resumeState, List.of(), signals,
+                materializedArtifacts);
+    }
+
+    public AgentResult withSignals(Map<String, String> updatedSignals) {
+        return new AgentResult(taskId, status, output, rawOutput, errorMessage, errorKind,
+                messageToUser, resumeState, pausedImages, updatedSignals, artifacts);
+    }
 
     public static AgentResult success(String taskId, Object output, String rawOutput) {
         return new AgentResult(taskId, Status.SUCCESS, output, rawOutput, null, null, Map.of(), List.of(), Map.of());

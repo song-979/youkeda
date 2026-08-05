@@ -7,11 +7,16 @@ import com.youkeda.project.wechatproject.bot.agent.AgentExecutionContext;
 import com.youkeda.project.wechatproject.bot.context.ContextTaskState;
 import com.youkeda.project.wechatproject.bot.context.ContextStage;
 import com.youkeda.project.wechatproject.bot.agent.AgentUnit;
+import com.youkeda.project.wechatproject.bot.validation.AgentResultGuard;
+import com.youkeda.project.wechatproject.bot.validation.DagCompletionGuard;
 import com.youkeda.project.wechatproject.bot.model.ModelReply;
 import com.youkeda.project.wechatproject.bot.model.UserRequest;
 import com.youkeda.project.wechatproject.bot.orchestrator.DagOrchestrationProperties;
 import com.youkeda.project.wechatproject.bot.service.AiService.ChatRequest;
 import com.youkeda.project.wechatproject.bot.tool.chat.SkillTools;
+import com.youkeda.project.wechatproject.bot.tool.chat.AutomationRuntime;
+import com.youkeda.project.wechatproject.bot.tool.chat.RagTools;
+import com.youkeda.project.wechatproject.bot.tool.travel.DiDiTaxiTools;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -23,6 +28,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
@@ -61,9 +67,32 @@ public class DagOrchestrationService {
     private final int planRepairAttempts;
     private final int nodeTimeoutSeconds;
     private final boolean reflectionEnabled;
+    private final AgentResultGuard resultGuard;
+    private final DagCompletionGuard completionGuard;
+    private final HeartbeatWakeScheduler heartbeatWakeScheduler;
+    private final boolean deferredRetryEnabled;
+    private final int maxDeferredRetries;
+    private final int deferredRetryFirstMinutes;
+    private final int deferredRetrySecondMinutes;
 
     public DagOrchestrationService(DagPlanningAgent planner, AgentRegistry registry,
                                    DagTaskStore store, DagOrchestrationProperties properties) {
+        this(planner, registry, store, properties, null, null, HeartbeatWakeScheduler.disabled());
+    }
+
+    public DagOrchestrationService(DagPlanningAgent planner, AgentRegistry registry,
+                                   DagTaskStore store, DagOrchestrationProperties properties,
+                                   AgentResultGuard resultGuard,
+                                   DagCompletionGuard completionGuard) {
+        this(planner, registry, store, properties, resultGuard, completionGuard,
+                HeartbeatWakeScheduler.disabled());
+    }
+
+    public DagOrchestrationService(DagPlanningAgent planner, AgentRegistry registry,
+                                   DagTaskStore store, DagOrchestrationProperties properties,
+                                   AgentResultGuard resultGuard,
+                                   DagCompletionGuard completionGuard,
+                                   HeartbeatWakeScheduler heartbeatWakeScheduler) {
         this.planner = planner;
         this.registry = registry;
         this.store = store;
@@ -75,6 +104,15 @@ public class DagOrchestrationService {
         this.planRepairAttempts = Math.max(0, properties.getDagPlanRepairAttempts());
         this.nodeTimeoutSeconds = Math.max(1, properties.getDagNodeTimeoutSeconds());
         this.reflectionEnabled = properties.isReflectionEnabled();
+        this.resultGuard = resultGuard;
+        this.completionGuard = completionGuard;
+        this.heartbeatWakeScheduler = heartbeatWakeScheduler != null
+                ? heartbeatWakeScheduler : HeartbeatWakeScheduler.disabled();
+        this.deferredRetryEnabled = properties.isDagDeferredRetryEnabled();
+        this.maxDeferredRetries = Math.max(0, properties.getDagMaxDeferredRetries());
+        this.deferredRetryFirstMinutes = Math.max(1, properties.getDagDeferredRetryFirstMinutes());
+        this.deferredRetrySecondMinutes = Math.max(
+                deferredRetryFirstMinutes, properties.getDagDeferredRetrySecondMinutes());
         store.findActive().forEach(task -> activeTasks.put(task.dagId(), task));
     }
 
@@ -189,6 +227,12 @@ public class DagOrchestrationService {
                 schedule(task, task.nodes().isEmpty());
                 return DagSubmission.controlled(task.dagId(), "已收到补充信息，继续 DAG 任务 " + task.dagId() + "。");
             }
+            if (task.status() == DagTask.Status.SLEEPING) {
+                resumeSleepingTask(task);
+                store.save(task);
+                schedule(task, task.nodes().isEmpty());
+                return DagSubmission.controlled(task.dagId(), "已提前唤醒 DAG 任务 " + task.dagId() + "。");
+            }
             store.save(task);
             if (task.status() == DagTask.Status.PAUSED || task.status() == DagTask.Status.PAUSE_REQUESTED) {
                 return DagSubmission.controlled(task.dagId(), "已记录对 DAG 任务 " + task.dagId() + " 的修改，继续时应用。");
@@ -214,6 +258,36 @@ public class DagOrchestrationService {
                 schedule(task, task.nodes().isEmpty());
             }
         });
+    }
+
+    /** Resumes one time-sleeping DAG without treating the wake event as a user message. */
+    public DagSubmission resumeSleeping(String dagId, UserRequest request,
+                                        Consumer<DagRunOutcome> completionCallback) {
+        DagTask task = store.findById(dagId).orElse(null);
+        if (task == null || task.status() != DagTask.Status.SLEEPING) {
+            return DagSubmission.noActive();
+        }
+        if (request == null || !task.recipientId().equals(request.userId())) {
+            return DagSubmission.unavailable("heartbeat recipient does not own the DAG");
+        }
+        synchronized (task) {
+            long retryAt = nextRetryAt(task);
+            boolean explicitTimeSleep = task.nodes().stream()
+                    .anyMatch(node -> node.status() == DagNode.Status.SLEEPING);
+            if (!explicitTimeSleep && retryAt > System.currentTimeMillis()) {
+                log.info("[HEARTBEAT] sleeping DAG resume deferred dagId={} userId={} notBefore={}",
+                        task.dagId(), task.recipientId(), Instant.ofEpochMilli(retryAt));
+                return DagSubmission.unavailable("deferred retry is not due before "
+                        + Instant.ofEpochMilli(retryAt));
+            }
+            log.info("[HEARTBEAT] resuming sleeping DAG dagId={} userId={}",
+                    task.dagId(), task.recipientId());
+            resumeSleepingTask(task);
+            store.save(task);
+            rememberCallbacks(task.dagId(), request, null, completionCallback);
+            schedule(task, task.nodes().isEmpty());
+        }
+        return DagSubmission.accepted(task.dagId(), "sleeping DAG resumed");
     }
 
     private void runAsync(DagTask task, boolean needsPlanning) {
@@ -419,6 +493,8 @@ public class DagOrchestrationService {
                     log.info("[DAG] rollback confirmed dagId={} node={}",
                             workflow.dagId(), pendingRollback.id());
                     resetRollbackBranch(workflow, pendingRollback);
+                } else if (workflow.status() == DagTask.Status.SLEEPING) {
+                    resumeSleepingTask(workflow);
                 } else {
                     resumeWaitingTask(workflow);
                 }
@@ -564,12 +640,22 @@ public class DagOrchestrationService {
 
             List<DagNode> ready = workflow.readyNodes(System.currentTimeMillis());
             if (ready.isEmpty()) {
-                long retryAt = nextRetryAt(workflow);
-                if (retryAt > System.currentTimeMillis() && retryAt < deadline) {
-                    sleepQuietly(Math.min(3_000L, retryAt - System.currentTimeMillis()));
-                    continue;
-                }
                 if (workflow.allSuccessful()) {
+                    DagCompletionGuard.Validation validation = completionGuard != null
+                            ? completionGuard.validateComplete(workflow, false) : null;
+                    if (validation != null && !validation.valid()) {
+                        log.warn("[DAG] completion rejected dagId={} errors={}",
+                                workflow.dagId(), validation.errors());
+                        if (reflectionEnabled && replans < maxReplans) {
+                            ReflectionApplyResult applied = reflectAndApply(
+                                    workflow, request, latestUserInput, validation.errors());
+                            replans++;
+                            if (applied == ReflectionApplyResult.CHANGED) continue;
+                            if (applied == ReflectionApplyResult.WAITING) return waitingOutcome(workflow);
+                            if (applied == ReflectionApplyResult.COMPLETED) return completedOutcome(workflow);
+                        }
+                        return terminalFailure(workflow);
+                    }
                     synchronized (workflow) {
                         if (!workflow.peekPendingUserInputs().isBlank()) continue;
                         workflow.setStatus(DagTask.Status.SUCCEEDED);
@@ -592,6 +678,16 @@ public class DagOrchestrationService {
                     }
                     return terminalFailure(workflow);
                 }
+                long retryAt = nextRetryAt(workflow);
+                if (retryAt > System.currentTimeMillis()) {
+                    if (isDeferredRetryAt(workflow, retryAt)) {
+                        return sleepForDeferredRetry(workflow, retryAt);
+                    }
+                    if (retryAt < deadline) {
+                        sleepQuietly(Math.min(3_000L, retryAt - System.currentTimeMillis()));
+                        continue;
+                    }
+                }
                 return terminalFailure(workflow);
             }
 
@@ -613,6 +709,11 @@ public class DagOrchestrationService {
                 workflow.setStatus(DagTask.Status.WAITING_USER);
                 store.save(workflow);
                 return waitingOutcome(workflow);
+            }
+            if (workflow.hasSleepingNode()) {
+                workflow.setStatus(DagTask.Status.SLEEPING);
+                store.save(workflow);
+                return DagRunOutcome.paused("DAG task " + workflow.dagId() + " is sleeping until its next wake time.");
             }
 
             String newInput = workflow.consumePendingUserInputs();
@@ -675,6 +776,9 @@ public class DagOrchestrationService {
             if (task.status() == DagTask.Status.PAUSED) {
                 return DagRunOutcome.paused("DAG 任务 " + task.dagId() + " 当前处于暂停状态。");
             }
+            if (task.status() == DagTask.Status.SLEEPING) {
+                return DagRunOutcome.paused("DAG task " + task.dagId() + " is sleeping.");
+            }
             if (task.status() == DagTask.Status.CANCELLED) {
                 return completedOutcome(task);
             }
@@ -698,7 +802,7 @@ public class DagOrchestrationService {
                     attempt, node.maxAttempts(), node.dependsOn(), shortHash(fingerprint));
             Future<NodeExecution> future = executor.submit(() -> new NodeExecution(
                     node, attempt, startedAt, workflow.inputRevision(),
-                    executeNode(node, hydrated, progressCallback)));
+                    executeNode(workflow, node, hydrated, progressCallback)));
             pendingExecutions.add(new PendingNodeExecution(
                     node, attempt, startedAt, workflow.inputRevision(), future));
         }
@@ -740,14 +844,27 @@ public class DagOrchestrationService {
                 AgentResult.failed(pending.node().id(), error, errorKind));
     }
 
-    private AgentResult executeNode(DagNode node, AgentTask task, Consumer<String> progressCallback) {
+    private AgentResult executeNode(DagTask workflow, DagNode node, AgentTask task,
+                                    Consumer<String> progressCallback) {
         try {
             AgentUnit agent = registry.get(node.agentType());
+            AutomationRuntime.setCurrentUser(workflow.recipientId());
+            DiDiTaxiTools.setCurrentUser(workflow.recipientId());
+            RagTools.setCurrentUser(workflow.recipientId());
             SkillTools.setCurrentAgent(node.agentType());
             try {
-                return agent.execute(task, progressCallback);
+                if (resultGuard != null) resultGuard.beginInvocation();
+                AgentResult result = agent.execute(task, progressCallback);
+                return resultGuard != null
+                        ? resultGuard.validate(result, new AgentResultGuard.GuardContext(
+                        workflow.recipientId(), task.taskId(), workflow.dagId(), node.id(),
+                        node.executionRevision(), node.agentType()))
+                        : result;
             } finally {
                 SkillTools.clearCurrentAgent();
+                AutomationRuntime.clearCurrentUser();
+                DiDiTaxiTools.clearCurrentUser();
+                RagTools.clearCurrentUser();
             }
         } catch (Exception e) {
             return AgentResult.failed(node.id(), e.getMessage(), AgentResult.classify(e.getMessage()));
@@ -759,6 +876,7 @@ public class DagOrchestrationService {
         DagNode node = execution.node();
         AgentResult result = execution.result() != null ? execution.result()
                 : AgentResult.failed(node.id(), "agent returned no result");
+        AgentResult previousResult = node.result();
         node.setResult(result);
         long finishedAt = System.currentTimeMillis();
         store.recordAttempt(workflow.dagId(), node, execution.attempt(), execution.startedAt(),
@@ -769,8 +887,14 @@ public class DagOrchestrationService {
             node.markResultRevision(workflow.revision());
             notifyProgress(progressCallback, "已完成：" + node.key());
         } else if (result.isPaused()) {
-            node.setStatus(DagNode.Status.WAITING_USER);
-            workflow.setWaitMessage(nonBlank(result.messageToUser(), "请补充信息后继续。"));
+            if ("TIME".equalsIgnoreCase(String.valueOf(result.resumeState().get("pauseType")))) {
+                node.setStatus(DagNode.Status.SLEEPING);
+                workflow.setStatus(DagTask.Status.SLEEPING);
+                workflow.setWaitMessage(null);
+            } else {
+                node.setStatus(DagNode.Status.WAITING_USER);
+                workflow.setWaitMessage(nonBlank(result.messageToUser(), "请补充信息后继续。"));
+            }
         } else if (failurePolicy.needsUserInput(result)) {
             node.setStatus(DagNode.Status.WAITING_USER);
             workflow.setWaitMessage(failurePolicy.userMessage(result));
@@ -781,7 +905,22 @@ public class DagOrchestrationService {
             notifyProgress(progressCallback, "步骤“" + node.key() + "”失败，正在重试（"
                     + node.attemptCount() + "/" + node.maxAttempts() + "）...");
         } else {
-            node.setStatus(DagNode.Status.FAILED);
+            FailurePolicy.DeferredRetryDecision deferred = deferredRetryEnabled
+                    ? failurePolicy.deferredRetry(result, previousResult, node, maxDeferredRetries)
+                    : new FailurePolicy.DeferredRetryDecision(false, 0, "deferred retry is disabled");
+            if (deferred.retryLater()) {
+                node.setStatus(DagNode.Status.RETRY_WAIT);
+                node.setNextAttemptAt(System.currentTimeMillis()
+                        + deferredRetryDelayMillis(deferred.deferredAttempt()));
+                log.info("[HEARTBEAT] DAG node eligible for deferred retry dagId={} node={} "
+                                + "errorKind={} deferredAttempt={}/{} nextRetryAt={}",
+                        workflow.dagId(), node.id(), result.errorKind(), deferred.deferredAttempt(),
+                        maxDeferredRetries, Instant.ofEpochMilli(node.nextAttemptAt()));
+            } else {
+                node.setStatus(DagNode.Status.FAILED);
+                log.info("[DAG] node failure is terminal dagId={} node={} errorKind={} reason={}",
+                        workflow.dagId(), node.id(), result.errorKind(), deferred.reason());
+            }
         }
         workflow.touch();
         store.save(workflow);
@@ -807,6 +946,14 @@ public class DagOrchestrationService {
         return switch (reflection.action()) {
             case CONTINUE -> ReflectionApplyResult.UNCHANGED;
             case COMPLETE, PARTIAL_COMPLETE -> {
+                boolean partial = reflection.action() == DagReflection.Action.PARTIAL_COMPLETE;
+                DagCompletionGuard.Validation validation = completionGuard != null
+                        ? completionGuard.validateComplete(workflow, partial) : null;
+                if (validation != null && !validation.valid()) {
+                    log.warn("[DAG] orchestrator completion rejected dagId={} action={} errors={}",
+                            workflow.dagId(), reflection.action(), validation.errors());
+                    yield ReflectionApplyResult.UNCHANGED;
+                }
                 workflow.setStatus(reflection.action() == DagReflection.Action.COMPLETE
                         ? DagTask.Status.SUCCEEDED : DagTask.Status.PARTIAL_SUCCEEDED);
                 workflow.setFinalReply(nonBlank(reflection.finalReply(),
@@ -925,6 +1072,7 @@ public class DagOrchestrationService {
                                   String latestUserInput) {
         Map<String, Object> parameters = new LinkedHashMap<>(node.parameters());
         parameters.put("userId", request.userId());
+        parameters.put("dagId", workflow.dagId());
         String instruction = node.instruction();
 
         if (latestUserInput != null && !latestUserInput.isBlank()) {
@@ -1000,6 +1148,16 @@ public class DagOrchestrationService {
         workflow.setWaitMessage(null);
     }
 
+    private void resumeSleepingTask(DagTask workflow) {
+        for (DagNode node : workflow.nodes()) {
+            if (node.status() == DagNode.Status.SLEEPING) {
+                node.resetForRetry(false);
+            }
+        }
+        workflow.setStatus(DagTask.Status.RUNNING);
+        workflow.setWaitMessage(null);
+    }
+
     private static DagNode pendingRollbackNode(DagTask workflow) {
         return workflow.nodes().stream()
                 .filter(node -> node.status() == DagNode.Status.WAITING_USER && node.result() != null)
@@ -1068,14 +1226,17 @@ public class DagOrchestrationService {
     }
 
     private DagRunOutcome waitingOutcome(DagTask workflow) {
-        List<ModelReply.ImagePayload> images = workflow.nodes().stream()
+        List<com.youkeda.project.wechatproject.bot.artifact.ArtifactRef> artifacts = workflow.nodes().stream()
                 .map(DagNode::result).filter(java.util.Objects::nonNull)
-                .flatMap(result -> result.pausedImages().stream()).toList();
+                .flatMap(result -> result.artifacts().stream())
+                .filter(ref -> ref.role() == com.youkeda.project.wechatproject.bot.artifact.ArtifactRole.USER_ACTION)
+                .toList();
         log.info("[DAG] waiting for user dagId={} nodes={} message={}",
                 workflow.dagId(), workflow.nodes().stream()
                         .filter(node -> node.status() == DagNode.Status.WAITING_USER)
                         .map(DagNode::id).toList(), safeLog(workflow.waitMessage()));
-        return DagRunOutcome.waiting(nonBlank(workflow.waitMessage(), "请补充信息后继续。"), images);
+        return DagRunOutcome.waiting(nonBlank(workflow.waitMessage(), "请补充信息后继续。"),
+                workflow.dagId(), artifacts);
     }
 
     private DagRunOutcome completedOutcome(DagTask workflow) {
@@ -1084,8 +1245,14 @@ public class DagOrchestrationService {
                 .map(node -> new DagRunOutcome.NodeOutput(
                         node.id(), node.agentType(), node.result()))
                 .toList();
+        List<com.youkeda.project.wechatproject.bot.artifact.ArtifactRef> artifacts = workflow.nodes().stream()
+                .filter(node -> node.status() == DagNode.Status.SUCCEEDED && node.result() != null)
+                .flatMap(node -> node.result().artifacts().stream()
+                        .filter(ref -> ref.revision() == node.resultRevision()))
+                .toList();
         return DagRunOutcome.completed(
-                nonBlank(workflow.finalReply(), aggregateReply(workflow, false)), outputs);
+                nonBlank(workflow.finalReply(), aggregateReply(workflow, false)), outputs,
+                workflow.dagId(), artifacts);
     }
 
     private static String aggregateReply(DagTask workflow, boolean partial) {
@@ -1128,6 +1295,64 @@ public class DagOrchestrationService {
         return workflow.nodes().stream()
                 .filter(node -> node.status() == DagNode.Status.RETRY_WAIT)
                 .mapToLong(DagNode::nextAttemptAt).min().orElse(0L);
+    }
+
+    private long deferredRetryDelayMillis(int deferredAttempt) {
+        int minutes = deferredAttempt <= 1
+                ? deferredRetryFirstMinutes : deferredRetrySecondMinutes;
+        return TimeUnit.MINUTES.toMillis(minutes);
+    }
+
+    private static boolean isDeferredRetryAt(DagTask workflow, long retryAt) {
+        return workflow.nodes().stream()
+                .anyMatch(node -> node.status() == DagNode.Status.RETRY_WAIT
+                        && node.nextAttemptAt() == retryAt
+                        && node.attemptCount() >= node.maxAttempts());
+    }
+
+    private DagRunOutcome sleepForDeferredRetry(DagTask workflow, long retryAt) {
+        DagNode retryNode = workflow.nodes().stream()
+                .filter(node -> node.status() == DagNode.Status.RETRY_WAIT)
+                .filter(node -> node.nextAttemptAt() == retryAt)
+                .filter(node -> node.attemptCount() >= node.maxAttempts())
+                .findFirst().orElse(null);
+        if (retryNode == null) {
+            return terminalFailure(workflow);
+        }
+
+        Instant wakeAt = Instant.ofEpochMilli(retryAt);
+        String reason = "deferred retry for DAG " + workflow.dagId() + " node " + retryNode.key()
+                + " after " + retryNode.result().errorKind() + ": "
+                + nonBlank(retryNode.result().errorMessage(), "transient failure");
+        boolean scheduled;
+        try {
+            scheduled = heartbeatWakeScheduler.schedule(workflow.recipientId(), wakeAt, reason);
+        } catch (RuntimeException e) {
+            scheduled = false;
+            log.warn("[HEARTBEAT] deferred retry wake scheduling failed dagId={} node={} error={}",
+                    workflow.dagId(), retryNode.id(), safeLog(e.getMessage()));
+        }
+        if (!scheduled) {
+            workflow.nodes().stream()
+                    .filter(node -> node.status() == DagNode.Status.RETRY_WAIT)
+                    .filter(node -> node.attemptCount() >= node.maxAttempts())
+                    .forEach(node -> node.setStatus(DagNode.Status.FAILED));
+            store.save(workflow);
+            log.warn("[HEARTBEAT] deferred retry rejected because no shared wake was scheduled "
+                            + "dagId={} node={} nextRetryAt={}",
+                    workflow.dagId(), retryNode.id(), wakeAt);
+            return terminalFailure(workflow);
+        }
+
+        workflow.setStatus(DagTask.Status.SLEEPING);
+        workflow.setWaitMessage(null);
+        store.save(workflow);
+        log.info("[HEARTBEAT] DAG sleeping for deferred retry dagId={} userId={} node={} "
+                        + "nextWakeAt={} errorKind={} attempt={}",
+                workflow.dagId(), workflow.recipientId(), retryNode.id(), wakeAt,
+                retryNode.result().errorKind(), retryNode.attemptCount());
+        return DagRunOutcome.paused("DAG task " + workflow.dagId()
+                + " is waiting for a verified transient failure to recover.");
     }
 
     private static String newDagId() {
@@ -1223,6 +1448,15 @@ public class DagOrchestrationService {
         static PlanResult task(DagTask task) { return new PlanResult(task, null); }
         static PlanResult direct(DagRunOutcome outcome) { return new PlanResult(null, outcome); }
         static PlanResult fallback() { return new PlanResult(null, null); }
+    }
+
+    @FunctionalInterface
+    public interface HeartbeatWakeScheduler {
+        boolean schedule(String userId, Instant wakeAt, String reason);
+
+        static HeartbeatWakeScheduler disabled() {
+            return (userId, wakeAt, reason) -> false;
+        }
     }
 
     public record DagSubmission(Status status, String dagId, String message) {

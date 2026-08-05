@@ -48,6 +48,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.UUID;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -71,8 +72,9 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
     private static final long SEND_RETRY_DELAY_MS = 3000;
     // Delay between consecutive image sends to avoid iLink rate limiting.
     private static final long INTER_IMAGE_DELAY_MS = 800;
-    // Delay between consecutive message dispatches to avoid iLink "prepare failed" rate limiting.
-    private static final long INTER_MESSAGE_DELAY_MS = 2500;
+    // Keep final reply batches below iLink's practical text/rate limits.
+    static final int MAX_TEXT_MESSAGE_CODE_POINTS = 1800;
+    static final long INTER_MESSAGE_DELAY_MS = 10_000;
     // Wait time for iLink session recovery after a send failure before retrying.
     private static final long SESSION_RECOVERY_DELAY_MS = 15_000;
     private static final long OUTBOX_POLL_INTERVAL_MS = 10_000;
@@ -94,6 +96,8 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
     private final ConcurrentHashMap<String, CompletableFuture<Void>> userMessageTails = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentLinkedQueue<PendingDelivery>> pendingDeliveries =
             new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ReentrantLock> deliveryLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> inboundContextEpochs = new ConcurrentHashMap<>();
 
     public MessageHandler(ILinkClient ilinkClient,
                           MessageBridge messageBridge,
@@ -131,6 +135,11 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
             if (userId == null || userId.isBlank()) {
                 continue;
             }
+            router.markUserActivity(userId);
+            if (automationRuntime != null) {
+                automationRuntime.markUserActivity(userId);
+            }
+            inboundContextEpochs.merge(userId, 1L, Long::sum);
             userMessageTails.compute(userId, (key, previous) -> {
                 CompletableFuture<Void> ready = previous == null
                         ? CompletableFuture.completedFuture(null)
@@ -164,6 +173,8 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
         }
         userMessageTails.clear();
         pendingDeliveries.clear();
+        deliveryLocks.clear();
+        inboundContextEpochs.clear();
     }
 
     private void handleMessage(WeixinMessage msg) {
@@ -172,6 +183,8 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
             log.debug("ignoring message without from_user_id");
             return;
         }
+
+        retryPendingDeliveryAfterContextRefresh(fromUserId);
 
         List<MessageItem> items = msg.getItem_list();
         if (items == null || items.isEmpty()) {
@@ -215,14 +228,10 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
         text = MessageAnnotation.build(text, fileAnnot, voiceAnnot, hasImages && (text == null || text.isBlank()));
 
         try {
-            trySendProgress(fromUserId, "正在思考...");
-            Consumer<String> progressCb = progressText -> {
-                try {
-                    ilinkClient.sendText(fromUserId, progressText);
-                } catch (IOException e) {
-                    log.debug("failed to send progress to user={}", fromUserId);
-                }
-            };
+            // Per-node progress is intentionally log-only. It previously exhausted the same
+            // iLink conversation context before the final result could be delivered.
+            Consumer<String> progressCb = progressText ->
+                    log.info("[DAG-PROGRESS] user={} message={}", fromUserId, progressText);
             Consumer<List<ModelReply>> completionCb = replies -> {
                 boolean delivered = dispatch(fromUserId, replies);
                 if (delivered) {
@@ -262,36 +271,122 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
      */
     private boolean dispatch(String toUser, List<ModelReply> replies) {
         if (replies == null || replies.isEmpty()) return true;
-        int sentCount = dispatchBatch(toUser, replies, 0);
-        if (sentCount >= replies.size()) return true;
+        ReentrantLock lock = deliveryLock(toUser);
+        lock.lock();
+        try {
+            long attemptedContextEpoch = contextEpoch(toUser);
+            return dispatchLocked(toUser, expandTextReplies(replies), attemptedContextEpoch);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private boolean dispatchLocked(String toUser, List<ModelReply> deliveryReplies,
+                                   long attemptedContextEpoch) {
+        int sentCount = dispatchBatch(toUser, deliveryReplies, 0);
+        if (sentCount >= deliveryReplies.size()) return true;
 
         // Recovery: wait for iLink heartbeat to restore session, then retry remaining
         log.info("waiting {}ms for iLink session recovery for user={}, {} of {} replies sent",
-                SESSION_RECOVERY_DELAY_MS, toUser, sentCount, replies.size());
+                SESSION_RECOVERY_DELAY_MS, toUser, sentCount, deliveryReplies.size());
         sleepQuietly(SESSION_RECOVERY_DELAY_MS);
 
         log.info("retrying {} remaining replies for user={}",
-                replies.size() - sentCount, toUser);
-        int sent2 = dispatchBatch(toUser, replies, sentCount);
-        if (sent2 < replies.size()) {
+                deliveryReplies.size() - sentCount, toUser);
+        int sent2 = dispatchBatch(toUser, deliveryReplies, sentCount);
+        if (sent2 < deliveryReplies.size()) {
             log.warn("retry also failed for user={}, {} of {} replies unsent",
-                    toUser, replies.size() - sent2, replies.size());
-            saveUnsentToMemory(toUser, replies, sent2);
-            enqueuePendingDelivery(toUser, replies.subList(sent2, replies.size()));
+                    toUser, deliveryReplies.size() - sent2, deliveryReplies.size());
+            saveUnsentToMemory(toUser, deliveryReplies, sent2);
+            enqueuePendingDelivery(toUser,
+                    deliveryReplies.subList(sent2, deliveryReplies.size()), attemptedContextEpoch);
             return false;
         }
         return true;
     }
 
+    static List<ModelReply> expandTextReplies(List<ModelReply> replies) {
+        if (replies == null || replies.isEmpty()) return List.of();
+        List<ModelReply> expanded = new ArrayList<>();
+        for (ModelReply reply : replies) {
+            if (reply == null) continue;
+            String text = reply.getTextContent();
+            List<String> chunks = splitTextForDelivery(text);
+            if (chunks.size() <= 1) {
+                expanded.add(reply);
+                continue;
+            }
+
+            chunks.forEach(chunk -> expanded.add(ModelReply.text(chunk)));
+            if (reply.getType() == ModelReply.Type.MIXED
+                    && (!reply.getImages().isEmpty()
+                    || reply.getAudioPayload() != null
+                    || reply.getFilePayload() != null)) {
+                expanded.add(new ModelReply(
+                        ModelReply.Type.MIXED, null, reply.getImages(),
+                        reply.getAudioPayload(), reply.getFilePayload()));
+            }
+        }
+        return List.copyOf(expanded);
+    }
+
+    static List<String> splitTextForDelivery(String text) {
+        if (text == null || text.isEmpty()
+                || text.codePointCount(0, text.length()) <= MAX_TEXT_MESSAGE_CODE_POINTS) {
+            return text == null ? List.of() : List.of(text);
+        }
+
+        List<String> chunks = new ArrayList<>();
+        int start = 0;
+        while (start < text.length()) {
+            int remaining = text.codePointCount(start, text.length());
+            if (remaining <= MAX_TEXT_MESSAGE_CODE_POINTS) {
+                chunks.add(text.substring(start));
+                break;
+            }
+            int hardEnd = text.offsetByCodePoints(start, MAX_TEXT_MESSAGE_CODE_POINTS);
+            int end = preferredSplitBoundary(text, start, hardEnd);
+            chunks.add(text.substring(start, end));
+            start = end;
+        }
+        return List.copyOf(chunks);
+    }
+
+    private static int preferredSplitBoundary(String text, int start, int hardEnd) {
+        int minimumCodePoints = MAX_TEXT_MESSAGE_CODE_POINTS * 2 / 3;
+        int minimum = text.offsetByCodePoints(start, minimumCodePoints);
+        for (int index = hardEnd; index > minimum; ) {
+            int codePoint = text.codePointBefore(index);
+            if (Character.isWhitespace(codePoint) || isSentenceBoundary(codePoint)) {
+                return index;
+            }
+            index -= Character.charCount(codePoint);
+        }
+        return hardEnd;
+    }
+
+    private static boolean isSentenceBoundary(int codePoint) {
+        return codePoint == '。' || codePoint == '！' || codePoint == '？'
+                || codePoint == '；' || codePoint == '.' || codePoint == '!'
+                || codePoint == '?' || codePoint == ';';
+    }
+
     private void enqueuePendingDelivery(String userId, List<ModelReply> replies) {
+        enqueuePendingDelivery(userId, replies, contextEpoch(userId));
+    }
+
+    private void enqueuePendingDelivery(String userId, List<ModelReply> replies,
+                                        long attemptedContextEpoch) {
         if (replies == null || replies.isEmpty()) return;
+        List<ModelReply> deliveryReplies = expandTextReplies(replies);
         PendingDelivery pending = new PendingDelivery(
-                UUID.randomUUID().toString(), List.copyOf(replies),
-                0, System.currentTimeMillis() + OUTBOX_INITIAL_RETRY_MS);
+                UUID.randomUUID().toString(), deliveryReplies,
+                0, System.currentTimeMillis() + OUTBOX_INITIAL_RETRY_MS,
+                attemptedContextEpoch);
         pendingDeliveries.computeIfAbsent(userId, ignored -> new ConcurrentLinkedQueue<>())
                 .offer(pending);
         log.warn("[DELIVERY] queued outboxId={} user={} replies={} nextRetryMs={}",
-                pending.id, userId, replies.size(), OUTBOX_INITIAL_RETRY_MS);
+                pending.id, userId, deliveryReplies.size(), OUTBOX_INITIAL_RETRY_MS);
     }
 
     private void retryPendingDeliveriesSafely() {
@@ -303,17 +398,39 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
     }
 
     private void retryPendingDeliveries() {
-        long now = System.currentTimeMillis();
-        pendingDeliveries.forEach((userId, queue) -> {
-            PendingDelivery pending = queue.peek();
-            if (pending == null) {
-                pendingDeliveries.remove(userId, queue);
-                return;
-            }
-            if (pending.nextAttemptAt > now) return;
+        pendingDeliveries.keySet().forEach(userId -> retryPendingDelivery(userId, false));
+    }
 
-            log.info("[DELIVERY] retrying outboxId={} user={} attempt={} replies={}",
-                    pending.id, userId, pending.attempts + 1, pending.replies.size());
+    private void retryPendingDeliveryAfterContextRefresh(String userId) {
+        retryPendingDelivery(userId, true);
+    }
+
+    private void retryPendingDelivery(String userId, boolean contextJustRefreshed) {
+        ConcurrentLinkedQueue<PendingDelivery> queue = pendingDeliveries.get(userId);
+        if (queue == null) return;
+        PendingDelivery pending = queue.peek();
+        if (pending == null) {
+            pendingDeliveries.remove(userId, queue);
+            return;
+        }
+
+        long currentEpoch = contextEpoch(userId);
+        if (currentEpoch <= pending.contextEpoch) {
+            return;
+        }
+        if (!contextJustRefreshed && pending.nextAttemptAt > System.currentTimeMillis()) {
+            return;
+        }
+
+        ReentrantLock lock = deliveryLock(userId);
+        if (!lock.tryLock()) {
+            return;
+        }
+        try {
+            log.info("[DELIVERY] retrying outboxId={} after context refresh user={} "
+                            + "attempt={} replies={} contextEpoch={}->{}",
+                    pending.id, userId, pending.attempts + 1, pending.replies.size(),
+                    pending.contextEpoch, currentEpoch);
             int sent = dispatchBatch(userId, pending.replies, 0);
             if (sent >= pending.replies.size()) {
                 queue.poll();
@@ -325,13 +442,34 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
 
             pending.replies = List.copyOf(pending.replies.subList(sent, pending.replies.size()));
             pending.attempts++;
+            pending.contextEpoch = currentEpoch;
             long retryDelay = Math.min(OUTBOX_MAX_RETRY_MS,
                     OUTBOX_INITIAL_RETRY_MS * (1L << Math.min(pending.attempts, 4)));
             pending.nextAttemptAt = System.currentTimeMillis() + retryDelay;
             log.warn("[DELIVERY] outbox still pending outboxId={} user={} attempts={} "
-                            + "remaining={} nextRetryMs={}",
-                    pending.id, userId, pending.attempts, pending.replies.size(), retryDelay);
-        });
+                            + "remaining={} awaitingNewContext=true",
+                    pending.id, userId, pending.attempts, pending.replies.size());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private ReentrantLock deliveryLock(String userId) {
+        return deliveryLocks.computeIfAbsent(userId, ignored -> new ReentrantLock(true));
+    }
+
+    private long contextEpoch(String userId) {
+        return inboundContextEpochs.getOrDefault(userId, 0L);
+    }
+
+    private void sendStandaloneText(String userId, String text) throws IOException {
+        ReentrantLock lock = deliveryLock(userId);
+        lock.lock();
+        try {
+            sendWithRetry(() -> ilinkClient.sendText(userId, text), "sendText", userId);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** Sends replies starting from {@code startIndex}. Returns new total sent count. */
@@ -582,26 +720,20 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
         }
     }
 
-    private void trySendProgress(String toUser, String message) {
-        try {
-            ilinkClient.sendText(toUser, message);
-        } catch (IOException e) {
-            log.warn("[DELIVERY] progress hint dropped user={} error={}", toUser, e.getMessage());
-        }
-    }
-
     private static final class PendingDelivery {
         private final String id;
         private List<ModelReply> replies;
         private int attempts;
         private long nextAttemptAt;
+        private long contextEpoch;
 
         private PendingDelivery(String id, List<ModelReply> replies,
-                                int attempts, long nextAttemptAt) {
+                                int attempts, long nextAttemptAt, long contextEpoch) {
             this.id = id;
             this.replies = replies;
             this.attempts = attempts;
             this.nextAttemptAt = nextAttemptAt;
+            this.contextEpoch = contextEpoch;
         }
     }
 
@@ -739,7 +871,7 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
 
     private void replyNotSupported(String toUserId) {
         try {
-            ilinkClient.sendText(toUserId, "目前支持文本、图片和语音消息，请发文字、图片或语音给我。");
+            sendStandaloneText(toUserId, "目前支持文本、图片和语音消息，请发文字、图片或语音给我。");
         } catch (IOException e) {
             log.error("failed to send not-supported hint to user={}", toUserId, e);
         }
@@ -750,7 +882,7 @@ public class MessageHandler implements OnMessageListener, InitializingBean, Disp
                 ? "抱歉，AI 服务返回错误：" + detail + "\n请稍后再试。"
                 : "抱歉，处理消息时发生错误，请稍后再试。";
         try {
-            ilinkClient.sendText(toUserId, reply);
+            sendStandaloneText(toUserId, reply);
         } catch (IOException e) {
             log.error("failed to send error fallback to user={}", toUserId, e);
         }

@@ -102,7 +102,8 @@ public interface AutomationStore {
 
     enum AutomationTaskKind {
         TEXT_REMINDER,
-        LLM_TASK
+        LLM_TASK,
+        AGENT_HEARTBEAT
     }
 
     record Reminder(

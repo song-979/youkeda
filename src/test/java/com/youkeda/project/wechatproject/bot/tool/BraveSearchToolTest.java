@@ -26,7 +26,8 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
         "ilink.enabled=false",
         "agent.speech.enabled=false",
         "agent.tools.search.enabled=true",
-        "agent.tools.search.api-key=test-api-key-for-validation"
+        "agent.tools.search.api-key=test-api-key-for-validation",
+        "agent.tools.automation.heartbeat-enabled=false"
 })
 class BraveSearchToolTest {
 
