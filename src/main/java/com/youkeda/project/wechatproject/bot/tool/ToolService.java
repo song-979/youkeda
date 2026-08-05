@@ -371,6 +371,31 @@ public class ToolService {
                 browserSecurityPolicy, browserMcpProperties, browserAuditLogger);
     }
 
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.xiaohongshu", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public XiaohongshuMcpProcessManager xiaohongshuMcpProcessManager(XiaohongshuProperties properties) {
+        return new XiaohongshuMcpProcessManager(properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.xiaohongshu", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public XiaohongshuMcpClient xiaohongshuMcpClient(XiaohongshuProperties properties) {
+        return new XiaohongshuMcpClient(properties);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnProperty(prefix = "agent.tools.xiaohongshu", name = "enabled",
+            havingValue = "true", matchIfMissing = true)
+    public XiaohongshuTools xiaohongshuTools(XiaohongshuMcpClient xiaohongshuMcpClient,
+                                             XiaohongshuProperties properties) {
+        return new XiaohongshuTools(xiaohongshuMcpClient, properties);
+    }
+
     // -------------------------------------------------------------------------
     // 小红书 MCP 工具
     // -------------------------------------------------------------------------
